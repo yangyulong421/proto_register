@@ -1,0 +1,135 @@
+syntax = "proto3";
+package kafka.search;
+option go_package = "proto_register/kafka/search";
+
+import "common/common.proto";
+
+// =============================================================================
+// Search 搜索服务 Kafka 事件定义
+//
+// 搜索服务负责消息、用户、群组的全文检索
+// 通过消费其他服务的事件来构建和维护搜索索引
+//
+// 【生产的 Topic】
+//   1. search.index.updated     - 索引更新完成
+//   2. search.index.deleted     - 索引删除完成
+//   3. search.index.rebuild     - 索引重建任务
+//   4. search.stats             - 搜索统计
+//
+// 【消费的 Topic】
+//   1. msg.search.index         - 消息索引请求（来自 message）
+//   2. msg.recalled             - 消息撤回（来自 message，删除索引）
+//   3. msg.deleted              - 消息删除（来自 message，删除索引）
+//   4. user.registered          - 用户注册（来自 user，建立索引）
+//   5. user.profile.updated     - 用户资料更新（来自 user，更新索引）
+//   6. user.deactivated         - 账号注销（来自 user，删除索引）
+//   7. group.created            - 群创建（来自 group，建立索引）
+//   8. group.info.updated       - 群信息更新（来自 group，更新索引）
+//   9. group.dissolved          - 群解散（来自 group，删除索引）
+//   10. media.deleted           - 媒体删除（来自 media，删除文件索引）
+//   11. relation.remark.updated - 备注修改（来自 relation，更新联系人索引）
+//   12. relation.blocked        - 拉黑（来自 relation，本地缓存供 RPC 过滤）
+//   13. relation.unblocked      - 取消拉黑（来自 relation，清除本地缓存）
+//   14. config.changed          - 配置变更（来自 config）
+// =============================================================================
+
+// ==================== 本地业务枚举 ====================
+
+// 索引类型枚举
+enum IndexType {
+  INDEX_TYPE_UNSPECIFIED = 0; // 未指定
+  INDEX_TYPE_MESSAGE     = 1; // 消息索引
+  INDEX_TYPE_USER        = 2; // 用户索引
+  INDEX_TYPE_GROUP       = 3; // 群组索引
+  INDEX_TYPE_FILE        = 4; // 文件索引
+}
+
+// 索引操作枚举
+enum IndexAction {
+  INDEX_ACTION_UNSPECIFIED = 0; // 未指定
+  INDEX_ACTION_CREATE      = 1; // 创建索引
+  INDEX_ACTION_UPDATE      = 2; // 更新索引
+  INDEX_ACTION_DELETE      = 3; // 删除索引
+  INDEX_ACTION_REBUILD     = 4; // 重建索引
+}
+
+// ============== 生产的事件 ==============
+
+// Topic: search.index.updated
+// 索引更新完成事件
+message SearchIndexUpdatedEvent {
+  common.EventHeader header      = 1; // 事件头
+  string             index_id    = 2; // 索引记录 ID
+  IndexType          index_type  = 3; // 索引类型
+  IndexAction        action      = 4; // 操作类型
+  string             document_id = 5; // 文档 ID（消息 ID/用户 ID/群 ID）
+  int64              update_time = 6; // 更新时间
+  int64              latency_ms  = 7; // 索引延迟（毫秒）
+  bool               success     = 8; // 是否成功
+  string             error_msg   = 9; // 错误信息（失败时有值）
+}
+
+// Topic: search.index.deleted
+// 索引删除完成事件
+message SearchIndexDeletedEvent {
+  common.EventHeader header      = 1; // 事件头
+  IndexType          index_type  = 2; // 索引类型
+  string             document_id = 3; // 文档 ID
+  string             reason      = 4; // 删除原因
+  int64              delete_time = 5; // 删除时间
+}
+
+// Topic: search.index.rebuild
+// 索引重建任务事件
+message SearchIndexRebuildEvent {
+  common.EventHeader header       = 1;  // 事件头
+  string             task_id      = 2;  // 重建任务 ID
+  IndexType          index_type   = 3;  // 索引类型
+  string             operator_id  = 4;  // 操作者 ID（管理员）
+  string             reason       = 5;  // 重建原因
+  int64              start_time   = 6;  // 开始时间
+  int64              end_time     = 7;  // 结束时间（完成后回填）
+  int64              total_docs   = 8;  // 总文档数
+  int64              indexed_docs = 9;  // 已索引文档数
+  string             status       = 10; // 状态：pending / running / completed / failed
+}
+
+// Topic: search.stats
+// 搜索统计事件
+message SearchStatsEvent {
+  common.EventHeader header             = 1;  // 事件头
+  string             server_id          = 2;  // 服务实例 ID
+  int64              period_start       = 3;  // 统计周期开始
+  int64              period_end         = 4;  // 统计周期结束
+  int64              search_count       = 5;  // 搜索请求数
+  int64              index_create_count = 6;  // 索引创建数
+  int64              index_update_count = 7;  // 索引更新数
+  int64              index_delete_count = 8;  // 索引删除数
+  int64              avg_search_latency = 9;  // 平均搜索延迟（毫秒）
+  int64              avg_index_latency  = 10; // 平均索引延迟（毫秒）
+  int64              total_doc_count    = 11; // 总文档数
+}
+
+// ============== 消费的事件 ==============
+
+// Topic: media.deleted（来自 media）
+// 媒体文件删除，从搜索索引中移除
+message MediaDeletedForSearch {
+  common.EventHeader header      = 1; // 事件头
+  string             media_id    = 2; // 媒体 ID
+  string             user_id     = 3; // 上传者 ID
+  string             file_type   = 4; // 文件类型
+  string             reason      = 5; // 删除原因
+  int64              delete_time = 6; // 删除时间
+}
+
+// Topic: relation.remark.updated（来自 relation）
+// 备注修改，更新联系人搜索索引
+message RemarkUpdatedForSearch {
+  common.EventHeader header      = 1; // 事件头
+  string             user_id     = 2; // 操作者 ID
+  string             friend_id   = 3; // 好友 ID
+  string             old_remark  = 4; // 旧备注
+  string             new_remark  = 5; // 新备注
+  int64              update_time = 6; // 更新时间
+}

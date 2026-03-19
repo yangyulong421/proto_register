@@ -1,0 +1,109 @@
+syntax = "proto3";
+package kafka.connecte;
+option go_package = "proto_register/kafka/connecte";
+
+import "common/common.proto";
+
+// ============================================================
+// 长连接网关 Kafka 事件
+// ============================================================
+// 服务职责：
+//   管理客户端与服务端之间的长连接（WebSocket / TCP），
+//   负责上行消息转发、连接生命周期管理及路由信息维护。
+//
+// 生产 Topic：
+//   msg.incoming.single    — 客户端上行单聊消息（message 服务消费）
+//   msg.incoming.group     — 客户端上行群聊消息（message 服务消费）
+//   conn.connected         — 用户连接建立
+//   conn.disconnected      — 用户断开连接
+//   conn.route.updated     — 连接路由变更（监控/运维用，Push 通过 RPC 获取连接信息）
+//   conn.heartbeat.lost    — 心跳丢失
+//   conn.stats             — 连接统计
+//
+// 消费 Topic：
+//   session.kicked         — 会话被踢（来自 session，断开对应连接）
+//   user.banned            — 用户封禁（来自 user，断开所有连接）
+//   user.deactivated       — 用户注销（来自 user，断开所有连接并清理路由）
+//   config.changed         — 配置变更
+//
+// 【职责边界说明】
+//   - 推送失败（push.result.fail）由 Push 服务自行处理重试
+//   - 连接健康状态通过心跳检测（conn.heartbeat.lost）维护
+// ============================================================
+
+// -------------------- 事件定义 --------------------
+
+// 客户端上行消息事件 —— Topic: msg.incoming.single | msg.incoming.group
+// 客户端通过长连接发送的原始消息，网关按 conversation_type 路由到不同 Topic
+// message 服务消费此事件进行消息验证、存储和分发
+message UpstreamMessageEvent {
+  common.EventHeader      header            = 1;  // 事件头部
+  string                  client_msg_id     = 2;  // 客户端生成的消息 ID（幂等去重）
+  string                  user_id           = 3;  // 发送者用户 ID
+  string                  conversation_id   = 4;  // 目标会话 ID
+  common.ConversationType conversation_type = 5;  // 会话类型
+  common.MessageType      msg_type          = 6;  // 消息类型
+  bytes                   content           = 7;  // 消息内容（序列化后的字节流）
+  common.PlatformType     platform          = 8;  // 发送平台
+  string                  device_id         = 9;  // 发送设备 ID
+  int64                   send_time         = 10; // 客户端发送时间戳（毫秒）
+}
+
+// 用户连接建立事件 —— Topic: conn.connected
+message ConnectedEvent {
+  common.EventHeader  header    = 1; // 事件头部
+  string              user_id   = 2; // 用户 ID
+  string              device_id = 3; // 设备 ID
+  common.PlatformType platform  = 4; // 平台类型
+  string              gateway   = 5; // 网关节点标识
+  string              ip        = 6; // 客户端 IP
+  int64               conn_time = 7; // 连接建立时间戳（毫秒）
+}
+
+// 用户断开连接事件 —— Topic: conn.disconnected
+message DisconnectedEvent {
+  common.EventHeader  header       = 1; // 事件头部
+  string              user_id      = 2; // 用户 ID
+  string              device_id    = 3; // 设备 ID
+  common.PlatformType platform     = 4; // 平台类型
+  string              gateway      = 5; // 网关节点标识
+  string              reason       = 6; // 断开原因（超时 / 主动 / 异常等）
+  int64               disconn_time = 7; // 断开时间戳（毫秒）
+  int64               duration     = 8; // 本次连接持续时长（毫秒）
+}
+
+// 连接路由变更事件 —— Topic: conn.route.updated
+// 通知 push 服务更新用户 → 网关节点的路由缓存
+message ConnRouteUpdatedEvent {
+  common.EventHeader  header      = 1; // 事件头部
+  string              user_id     = 2; // 用户 ID
+  string              device_id   = 3; // 设备 ID
+  common.PlatformType platform    = 4; // 平台类型
+  string              old_gateway = 5; // 旧网关节点
+  string              new_gateway = 6; // 新网关节点
+  int64               update_time = 7; // 路由更新时间戳（毫秒）
+}
+
+// 心跳丢失事件 —— Topic: conn.heartbeat.lost
+message HeartbeatLostEvent {
+  common.EventHeader  header         = 1; // 事件头部
+  string              user_id        = 2; // 用户 ID
+  string              device_id      = 3; // 设备 ID
+  common.PlatformType platform       = 4; // 平台类型
+  string              gateway        = 5; // 网关节点标识
+  int64               last_heartbeat = 6; // 最后一次心跳时间戳（毫秒）
+  int32               miss_count     = 7; // 连续丢失心跳次数
+  int64               detect_time    = 8; // 检测时间戳（毫秒）
+}
+
+// 连接统计事件 —— Topic: conn.stats
+message ConnStatsEvent {
+  common.EventHeader header             = 1; // 事件头部
+  string             gateway            = 2; // 网关节点标识
+  int64              online_count       = 3; // 当前在线连接数
+  int64              total_connected    = 4; // 统计周期内新建连接数
+  int64              total_disconnected = 5; // 统计周期内断开连接数
+  int64              upstream_msg_count = 6; // 统计周期内上行消息数
+  int64              stats_time         = 7; // 统计时间戳（毫秒）
+  int64              period_seconds     = 8; // 统计周期（秒）
+}

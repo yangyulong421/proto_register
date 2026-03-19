@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package notification;
+
+option go_package = "proto_register/rpc/notification";
+
+import "common/common.proto";
+
+// =============================================================================
+// Notification 通知服务 — RPC 接口定义
+//
+// 核心职责：
+//   管理系统通知、业务通知和提醒
+//   包括好友请求通知、群组邀请/踢出/解散通知、@提及通知、系统公告等
+//
+// 通知类型统一使用 common.NotificationType 枚举，确保全系统一致。
+// =============================================================================
+
+// ==================== 服务定义 ====================
+
+service NotificationService {
+  // 发送单条通知
+  rpc SendNotification(SendNotificationRequest) returns (SendNotificationResponse);
+
+  // 批量发送通知
+  rpc BatchSendNotification(BatchSendNotificationRequest) returns (BatchSendNotificationResponse);
+
+  // 获取通知列表（支持分页和类型过滤）
+  rpc GetNotifications(GetNotificationsRequest) returns (GetNotificationsResponse);
+
+  // 标记指定通知为已读
+  rpc MarkNotificationRead(MarkNotificationReadRequest) returns (MarkNotificationReadResponse);
+
+  // 标记全部通知为已读
+  rpc MarkAllNotificationRead(MarkAllNotificationReadRequest) returns (MarkAllNotificationReadResponse);
+
+  // 删除通知
+  rpc DeleteNotification(DeleteNotificationRequest) returns (DeleteNotificationResponse);
+
+  // 获取未读通知数量
+  rpc GetUnreadNotificationCount(GetUnreadNotificationCountRequest) returns (GetUnreadNotificationCountResponse);
+}
+
+// ==================== 数据结构 ====================
+
+// 通知详情
+message NotificationInfo {
+  string                  notification_id = 1;  // 通知唯一 ID
+  string                  user_id         = 2;  // 接收者用户 ID
+  common.NotificationType type            = 3;  // 通知类型
+  string                  title           = 4;  // 通知标题
+  string                  content         = 5;  // 通知正文内容
+  string                  sender_id       = 6;  // 发送者用户 ID
+  common.UserBrief        sender          = 7;  // 发送者简要信息
+  bool                    is_read         = 8;  // 是否已读
+  map<string, string>     extra           = 9;  // 扩展字段
+  int64                   created_at      = 10; // 创建时间戳（毫秒）
+}
+
+// ==================== 请求/响应 ====================
+
+// --- SendNotification ---
+message SendNotificationRequest {
+  string                  user_id   = 1; // 接收者用户 ID
+  common.NotificationType type      = 2; // 通知类型
+  string                  title     = 3; // 通知标题
+  string                  content   = 4; // 通知正文内容
+  string                  sender_id = 5; // 发送者用户 ID
+  map<string, string>     extra     = 6; // 扩展字段
+}
+
+message SendNotificationResponse {
+  common.ResponseMeta meta            = 1; // 响应元数据
+  string              notification_id = 2; // 生成的通知 ID
+}
+
+// --- BatchSendNotification ---
+message BatchSendNotificationRequest {
+  repeated string         user_ids  = 1; // 接收者用户 ID 列表
+  common.NotificationType type      = 2; // 通知类型
+  string                  title     = 3; // 通知标题
+  string                  content   = 4; // 通知正文内容
+  string                  sender_id = 5; // 发送者用户 ID
+  map<string, string>     extra     = 6; // 扩展字段
+}
+
+message BatchSendNotificationResponse {
+  common.ResponseMeta meta             = 1; // 响应元数据
+  int32               success_count    = 2; // 成功发送的通知数量
+  repeated string     failed_user_ids  = 3; // 发送失败的用户 ID 列表
+}
+
+// --- GetNotifications ---
+message GetNotificationsRequest {
+  string                  user_id     = 1; // 用户 ID
+  common.NotificationType type        = 2; // 通知类型过滤（可选）
+  bool                    unread_only = 3; // 是否仅查询未读通知
+  common.Pagination       pagination  = 4; // 分页参数
+}
+
+message GetNotificationsResponse {
+  common.ResponseMeta      meta              = 1; // 响应元数据
+  repeated NotificationInfo notifications    = 2; // 通知列表
+  common.PaginationResult  pagination_result = 3; // 分页结果
+}
+
+// --- MarkNotificationRead ---
+message MarkNotificationReadRequest {
+  string          user_id          = 1; // 用户 ID
+  repeated string notification_ids = 2; // 通知 ID 列表
+}
+
+message MarkNotificationReadResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}
+
+// --- MarkAllNotificationRead ---
+message MarkAllNotificationReadRequest {
+  string                  user_id = 1; // 用户 ID
+  common.NotificationType type    = 2; // 通知类型过滤（可选）
+}
+
+message MarkAllNotificationReadResponse {
+  common.ResponseMeta meta         = 1; // 响应元数据
+  int32               marked_count = 2; // 被标记为已读的通知数量
+}
+
+// --- DeleteNotification ---
+message DeleteNotificationRequest {
+  string          user_id          = 1; // 用户 ID
+  repeated string notification_ids = 2; // 通知 ID 列表
+}
+
+message DeleteNotificationResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}
+
+// --- GetUnreadNotificationCount ---
+message GetUnreadNotificationCountRequest {
+  string                  user_id = 1; // 用户 ID
+  common.NotificationType type    = 2; // 通知类型过滤（可选）
+}
+
+message GetUnreadNotificationCountResponse {
+  common.ResponseMeta meta               = 1; // 响应元数据
+  int64               unread_count       = 2; // 未读通知总数
+  map<string, int64>  type_unread_counts = 3; // 各类型未读数量
+}

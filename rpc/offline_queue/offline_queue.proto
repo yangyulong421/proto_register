@@ -1,0 +1,167 @@
+syntax = "proto3";
+
+package offline_queue;
+
+option go_package = "proto_register/rpc/offline_queue";
+
+import "common/common.proto";
+
+// =============================================================================
+// OfflineQueue 离线同步信号队列服务 — RPC 接口定义
+//
+// 核心职责：
+//   在 notify+sync 模式下，存储用户离线期间的 **同步信号**（非完整消息体）
+//   用户上线后批量拉取同步信号，了解哪些会话有新消息，再调用 Message.PullMessages 拉取
+//   管理同步信号的过期清理和队列溢出策略
+//
+// notify+sync 模式下的离线队列：
+//   - 不存储完整消息体（消息统一存在 Message 服务）
+//   - 仅存储轻量同步信号：{conversation_id, max_seq, sender_brief, msg_type, preview}
+//   - 用户上线后拉取同步信号 → 知道哪些会话有新消息 → 调用 PullMessages
+//
+// 职责边界（修复 #9）：
+//   - OfflineQueue 只关心同步信号的存取，不感知推送通道（APNs/FCM 等）
+//   - 是否触发离线推送由 Push 服务自行决定
+//   - 推送通道、设备 Token 等信息由 Push 服务管理
+//
+// 注意：消息的真实内容由 Message 服务存储和提供
+// =============================================================================
+
+// ==================== 服务定义 ====================
+
+service OfflineQueueService {
+  // 入队同步信号（用户离线时，Push 服务调用此接口）
+  rpc EnqueueSyncSignal(EnqueueSyncSignalRequest) returns (EnqueueSyncSignalResponse);
+
+  // 批量入队同步信号（群消息场景，批量为多个离线用户入队）
+  rpc BatchEnqueueSyncSignal(BatchEnqueueSyncSignalRequest) returns (BatchEnqueueSyncSignalResponse);
+
+  // 出队同步信号（用户上线时拉取待同步的会话信息）
+  rpc DequeueSyncSignals(DequeueSyncSignalsRequest) returns (DequeueSyncSignalsResponse);
+
+  // 获取用户离线同步信号数量
+  rpc GetSyncSignalCount(GetSyncSignalCountRequest) returns (GetSyncSignalCountResponse);
+
+  // 清空用户所有离线同步信号
+  rpc ClearSyncSignals(ClearSyncSignalsRequest) returns (ClearSyncSignalsResponse);
+
+  // 移除指定会话的同步信号（消息撤回/删除时调用）
+  rpc RemoveSyncSignal(RemoveSyncSignalRequest) returns (RemoveSyncSignalResponse);
+
+  // 获取队列统计信息（运维监控用）
+  rpc GetQueueStats(GetQueueStatsRequest) returns (GetQueueStatsResponse);
+}
+
+// ==================== 数据结构 ====================
+
+// 离线同步信号（轻量级，不含完整消息体）
+message SyncSignalEntry {
+  string                  signal_id         = 1;  // 同步信号唯一 ID
+  string                  conversation_id   = 2;  // 会话 ID
+  common.ConversationType conversation_type = 3;  // 会话类型
+  int64                   max_seq           = 4;  // 该会话最新消息 seq
+  string                  sender_id         = 5;  // 最后一条消息的发送者 ID
+  string                  sender_name       = 6;  // 发送者昵称（用于推送展示）
+  common.MessageType      msg_type          = 7;  // 最后一条消息类型
+  string                  content_preview   = 8;  // 内容预览（截断至 100 字符）
+  int32                   unread_count      = 9;  // 该会话新增未读消息数
+  int32                   priority          = 10; // 优先级（0=普通，1=高优先，如@消息）
+  int64                   enqueue_time      = 11; // 入队时间戳（毫秒）
+  int64                   expire_at         = 12; // 过期时间戳（毫秒）
+}
+
+// ==================== 请求/响应 ====================
+
+// --- EnqueueSyncSignal（已移除推送通道相关字段，职责归 Push 服务）---
+message EnqueueSyncSignalRequest {
+  string                  user_id           = 1;  // 目标用户 ID
+  string                  conversation_id   = 2;  // 会话 ID
+  common.ConversationType conversation_type = 3;  // 会话类型
+  int64                   max_seq           = 4;  // 当前最大 seq
+  string                  sender_id         = 5;  // 发送者 ID
+  string                  sender_name       = 6;  // 发送者昵称
+  common.MessageType      msg_type          = 7;  // 消息类型
+  string                  content_preview   = 8;  // 内容预览
+  int32                   priority          = 9;  // 优先级
+  int64                   expire_at         = 10; // 过期时间
+}
+
+message EnqueueSyncSignalResponse {
+  common.ResponseMeta meta        = 1; // 响应元信息
+  string              signal_id   = 2; // 生成的同步信号 ID
+  int64               queue_depth = 3; // 当前用户队列深度
+}
+
+// --- BatchEnqueueSyncSignal ---
+message BatchEnqueueSyncSignalRequest {
+  repeated string         user_ids          = 1;  // 目标用户 ID 列表
+  string                  conversation_id   = 2;  // 会话 ID
+  common.ConversationType conversation_type = 3;  // 会话类型
+  int64                   max_seq           = 4;  // 最大 seq
+  string                  sender_id         = 5;  // 发送者 ID
+  string                  sender_name       = 6;  // 发送者昵称
+  common.MessageType      msg_type          = 7;  // 消息类型
+  string                  content_preview   = 8;  // 内容预览
+  int32                   priority          = 9;  // 优先级
+  int64                   expire_at         = 10; // 过期时间
+}
+
+message BatchEnqueueSyncSignalResponse {
+  common.ResponseMeta meta          = 1; // 响应元信息
+  int32               success_count = 2; // 成功入队数
+  int32               fail_count    = 3; // 失败数
+}
+
+// --- DequeueSyncSignals ---
+message DequeueSyncSignalsRequest {
+  string              user_id  = 1; // 用户 ID
+  int32               count    = 2; // 最大拉取条数（默认 100）
+  common.PlatformType platform = 3; // 客户端平台（用于统计）
+}
+
+message DequeueSyncSignalsResponse {
+  common.ResponseMeta      meta     = 1; // 响应元信息
+  repeated SyncSignalEntry signals  = 2; // 同步信号列表（按优先级 + 时间排序）
+  bool                     has_more = 3; // 是否还有更多信号
+}
+
+// --- GetSyncSignalCount ---
+message GetSyncSignalCountRequest {
+  string user_id = 1; // 用户 ID
+}
+
+message GetSyncSignalCountResponse {
+  common.ResponseMeta meta  = 1; // 响应元信息
+  int64               count = 2; // 待同步信号数
+}
+
+// --- ClearSyncSignals ---
+message ClearSyncSignalsRequest {
+  string user_id = 1; // 用户 ID
+}
+
+message ClearSyncSignalsResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- RemoveSyncSignal ---
+message RemoveSyncSignalRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 要移除的会话 ID
+  string msg_id          = 3; // 关联的消息 ID（可选，精确匹配）
+}
+
+message RemoveSyncSignalResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetQueueStats ---
+message GetQueueStatsRequest {}
+
+message GetQueueStatsResponse {
+  common.ResponseMeta meta            = 1; // 响应元信息
+  int64               total_signals   = 2; // 总同步信号数
+  int64               total_users     = 3; // 有待同步信号的用户数
+  int64               avg_queue_depth = 4; // 平均队列深度
+  int64               max_queue_depth = 5; // 最大队列深度
+}

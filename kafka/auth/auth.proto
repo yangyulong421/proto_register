@@ -1,0 +1,156 @@
+syntax = "proto3";
+package kafka.auth;
+option go_package = "proto_register/kafka/auth";
+
+import "common/common.proto";
+
+// =============================================================================
+// Auth 认证服务 Kafka 事件定义
+//
+// 认证服务负责用户注册、登录、登出、Token 管理等
+//
+// 【生产的 Topic】
+//   1. auth.register.success   - 注册成功
+//   2. auth.login.success      - 登录成功
+//   3. auth.login.fail         - 登录失败
+//   4. auth.logout             - 用户登出
+//   5. auth.token.refreshed    - Token 刷新
+//   6. auth.token.revoked      - Token 撤销
+//   7. auth.password.changed   - 密码修改
+//   8. auth.stats              - 认证统计
+//
+// 【消费的 Topic】
+//   1. user.banned             - 账号封禁（来自 user，强制下线并吊销 Token）
+//   2. user.unbanned           - 账号解禁（来自 user）
+//   3. user.deactivated        - 账号注销（来自 user，清除认证数据）
+//   4. config.changed          - 配置变更（来自 config）
+// =============================================================================
+
+// ==================== 本地业务枚举 ====================
+
+// 注册方式枚举
+enum RegisterType {
+  REGISTER_TYPE_UNSPECIFIED = 0; // 未指定
+  REGISTER_TYPE_PHONE       = 1; // 手机号注册
+  REGISTER_TYPE_EMAIL       = 2; // 邮箱注册
+  REGISTER_TYPE_USERNAME    = 3; // 用户名注册
+  REGISTER_TYPE_THIRD_PARTY = 4; // 第三方登录注册
+}
+
+// 登录方式枚举
+enum LoginType {
+  LOGIN_TYPE_UNSPECIFIED = 0; // 未指定
+  LOGIN_TYPE_PASSWORD    = 1; // 密码登录
+  LOGIN_TYPE_SMS_CODE    = 2; // 短信验证码登录
+  LOGIN_TYPE_EMAIL_CODE  = 3; // 邮箱验证码登录
+  LOGIN_TYPE_TOKEN       = 4; // Token 自动登录
+  LOGIN_TYPE_THIRD_PARTY = 5; // 第三方登录
+}
+
+// ============== 生产的事件 ==============
+
+// Topic: auth.register.success
+// 用户注册成功事件
+message RegisterSuccessEvent {
+  common.EventHeader  header        = 1;  // 事件头
+  string              user_id       = 2;  // 用户 ID
+  string              username      = 3;  // 用户名
+  string              nickname      = 4;  // 昵称
+  RegisterType        register_type = 5;  // 注册方式
+  common.PlatformType platform      = 6;  // 注册平台
+  string              device_id     = 7;  // 设备 ID
+  string              ip            = 8;  // 注册 IP
+  string              user_agent    = 9;  // User-Agent
+  int64               register_time = 10; // 注册时间
+}
+
+// Topic: auth.login.success
+// 登录成功事件
+message LoginSuccessEvent {
+  common.EventHeader  header      = 1;  // 事件头
+  string              user_id     = 2;  // 用户 ID
+  LoginType           login_type  = 3;  // 登录方式
+  common.PlatformType platform    = 4;  // 登录平台
+  string              device_id   = 5;  // 设备 ID
+  string              device_name = 6;  // 设备名称
+  string              ip          = 7;  // 登录 IP
+  string              user_agent  = 8;  // User-Agent
+  string              session_id  = 9;  // 会话 ID
+  int64               login_time  = 10; // 登录时间
+}
+
+// Topic: auth.login.fail
+// 登录失败事件
+message LoginFailEvent {
+  common.EventHeader  header     = 1;  // 事件头
+  string              identifier = 2;  // 登录标识（手机号/邮箱/用户名）
+  LoginType           login_type = 3;  // 登录方式
+  common.PlatformType platform   = 4;  // 平台
+  string              ip         = 5;  // 登录 IP
+  string              user_agent = 6;  // User-Agent
+  string              error_code = 7;  // 错误码
+  string              error_msg  = 8;  // 错误信息
+  int32               fail_count = 9;  // 连续失败次数
+  int64               fail_time  = 10; // 失败时间
+}
+
+// Topic: auth.logout
+// 用户登出事件
+message LogoutEvent {
+  common.EventHeader  header      = 1; // 事件头
+  string              user_id     = 2; // 用户 ID
+  string              session_id  = 3; // 会话 ID
+  common.PlatformType platform    = 4; // 平台
+  string              device_id   = 5; // 设备 ID
+  string              reason      = 6; // 登出原因：voluntary / kicked / banned / expired
+  int64               logout_time = 7; // 登出时间
+}
+
+// Topic: auth.token.refreshed
+// Token 刷新事件
+message TokenRefreshedEvent {
+  common.EventHeader  header        = 1; // 事件头
+  string              user_id       = 2; // 用户 ID
+  string              session_id    = 3; // 会话 ID
+  common.PlatformType platform      = 4; // 平台
+  int64               old_expire_at = 5; // 旧过期时间
+  int64               new_expire_at = 6; // 新过期时间
+  int64               refresh_time  = 7; // 刷新时间
+}
+
+// Topic: auth.token.revoked
+// Token 撤销事件
+message TokenRevokedEvent {
+  common.EventHeader header      = 1; // 事件头
+  string             user_id     = 2; // 用户 ID
+  string             session_id  = 3; // 会话 ID
+  string             reason      = 4; // 撤销原因
+  string             operator_id = 5; // 操作者 ID（管理员操作时有值）
+  int64              revoke_time = 6; // 撤销时间
+}
+
+// Topic: auth.password.changed
+// 密码修改事件
+message PasswordChangedEvent {
+  common.EventHeader  header      = 1; // 事件头
+  string              user_id     = 2; // 用户 ID
+  common.PlatformType platform    = 3; // 操作平台
+  string              ip          = 4; // 操作 IP
+  string              change_type = 5; // 变更类型：reset / modify
+  int64               change_time = 6; // 变更时间
+}
+
+// Topic: auth.stats
+// 认证统计事件
+message AuthStatsEvent {
+  common.EventHeader header              = 1;  // 事件头
+  string             server_id           = 2;  // 服务实例 ID
+  int64              period_start        = 3;  // 统计周期开始
+  int64              period_end          = 4;  // 统计周期结束
+  int64              register_count      = 5;  // 注册数
+  int64              login_count         = 6;  // 登录数
+  int64              login_fail_count    = 7;  // 登录失败数
+  int64              logout_count        = 8;  // 登出数
+  int64              token_refresh_count = 9;  // Token 刷新数
+  int64              token_revoke_count  = 10; // Token 撤销数
+}

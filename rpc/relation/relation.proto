@@ -1,0 +1,325 @@
+syntax = "proto3";
+
+package relation;
+
+option go_package = "proto_register/rpc/relation";
+
+import "common/common.proto";
+
+// =============================================================================
+// Relation 好友关系服务 — RPC 接口定义
+//
+// 核心职责：
+//   好友申请/处理、好友列表管理、好友备注
+//   好友分组管理（创建/编辑/删除分组，分组内好友维护）
+//   黑名单管理
+//   好友关系校验（单个/批量）
+//
+// 职责边界：
+//   - 不管理群组成员关系（属于 Group 服务）
+//   - 好友搜索由 Search 服务提供
+//   - 好友关系变更通过 Kafka 事件通知其他服务
+// =============================================================================
+
+// ==================== 服务特有类型 ====================
+
+// 好友申请信息
+message FriendRequestInfo {
+  string           request_id   = 1;  // 申请 ID
+  string           from_user_id = 2;  // 发起方用户 ID
+  string           to_user_id   = 3;  // 接收方用户 ID
+  string           message      = 4;  // 申请附言
+  int32            status       = 5;  // 申请状态：0=待处理 1=已同意 2=已拒绝
+  common.UserBrief from_user    = 6;  // 发起方用户摘要
+  common.UserBrief to_user      = 7;  // 接收方用户摘要
+  int64            created_at   = 8;  // 创建时间戳（毫秒）
+  int64            handled_at   = 9;  // 处理时间戳（毫秒）
+}
+
+// 好友信息
+message FriendInfo {
+  string              user_id        = 1; // 好友用户 ID
+  string              nickname       = 2; // 好友昵称
+  string              avatar_url     = 3; // 好友头像 URL
+  string remark          = 4; // 好友备注名
+  string source          = 5; // 好友来源（如 search / group / qrcode）
+  int64  created_at      = 6; // 成为好友的时间戳（毫秒）
+  string friend_group_id = 7; // 所属好友分组 ID（空表示"未分组"）
+}
+
+// 黑名单信息
+message BlockInfo {
+  string user_id    = 1; // 被拉黑用户 ID
+  string nickname   = 2; // 被拉黑用户昵称
+  string avatar_url = 3; // 被拉黑用户头像 URL
+  int64  blocked_at = 4; // 拉黑时间戳（毫秒）
+}
+
+// 好友分组信息
+message FriendGroup {
+  string group_id   = 1; // 分组 ID
+  string user_id    = 2; // 所属用户 ID
+  string name       = 3; // 分组名称
+  int32  sort_order = 4; // 排序权重（越小越靠前）
+  int32  count      = 5; // 分组内好友数量
+  int64  created_at = 6; // 创建时间戳（毫秒）
+  int64  updated_at = 7; // 更新时间戳（毫秒）
+}
+
+// 批量检查好友关系 — 单条结果
+message FriendshipResult {
+  string               target_user_id = 1; // 目标用户 ID
+  common.RelationStatus status        = 2; // 关系状态
+}
+
+// ==================== 服务定义 ====================
+
+service RelationService {
+  // ---- 好友申请 ----
+  // 发送好友申请
+  rpc SendFriendRequest(SendFriendRequestRequest) returns (SendFriendRequestResponse);
+  // 处理好友申请（同意/拒绝）
+  rpc HandleFriendRequest(HandleFriendRequestRequest) returns (HandleFriendRequestResponse);
+  // 获取好友申请列表
+  rpc GetFriendRequests(GetFriendRequestsRequest) returns (GetFriendRequestsResponse);
+  // 获取待处理好友申请数量（MED-09: ApiGateway.GetInitData 需要此接口）
+  rpc GetPendingFriendRequestCount(GetPendingFriendRequestCountRequest) returns (GetPendingFriendRequestCountResponse);
+
+  // ---- 好友管理 ----
+  // 获取好友列表
+  rpc GetFriendList(GetFriendListRequest) returns (GetFriendListResponse);
+  // 删除好友
+  rpc DeleteFriend(DeleteFriendRequest) returns (DeleteFriendResponse);
+  // 设置好友备注
+  rpc SetFriendRemark(SetFriendRemarkRequest) returns (SetFriendRemarkResponse);
+
+  // ---- 好友关系校验 ----
+  // 检查好友关系
+  rpc CheckFriendship(CheckFriendshipRequest) returns (CheckFriendshipResponse);
+  // 批量检查好友关系
+  rpc BatchCheckFriendship(BatchCheckFriendshipRequest) returns (BatchCheckFriendshipResponse);
+
+  // ---- 好友分组 ----
+  // 创建好友分组
+  rpc CreateFriendGroup(CreateFriendGroupRequest) returns (CreateFriendGroupResponse);
+  // 获取好友分组列表
+  rpc GetFriendGroups(GetFriendGroupsRequest) returns (GetFriendGroupsResponse);
+  // 更新好友分组
+  rpc UpdateFriendGroup(UpdateFriendGroupRequest) returns (UpdateFriendGroupResponse);
+  // 删除好友分组（分组内好友移入"未分组"）
+  rpc DeleteFriendGroup(DeleteFriendGroupRequest) returns (DeleteFriendGroupResponse);
+  // 移动好友到指定分组
+  rpc MoveFriendToGroup(MoveFriendToGroupRequest) returns (MoveFriendToGroupResponse);
+
+  // ---- 黑名单 ----
+  // 拉黑用户
+  rpc BlockUser(BlockUserRequest) returns (BlockUserResponse);
+  // 取消拉黑
+  rpc UnblockUser(UnblockUserRequest) returns (UnblockUserResponse);
+  // 获取黑名单列表
+  rpc GetBlockList(GetBlockListRequest) returns (GetBlockListResponse);
+  // 检查黑名单关系（A 是否拉黑了 B）
+  rpc CheckBlockship(CheckBlockshipRequest) returns (CheckBlockshipResponse);
+}
+
+// ==================== 请求/响应 ====================
+
+// --- SendFriendRequest ---
+message SendFriendRequestRequest {
+  string from_user_id = 1; // 发起方用户 ID
+  string to_user_id   = 2; // 接收方用户 ID
+  string message      = 3; // 申请附言
+  string source       = 4; // 好友来源
+}
+
+message SendFriendRequestResponse {
+  common.ResponseMeta meta       = 1; // 响应元信息
+  string               request_id = 2; // 生成的申请 ID
+}
+
+// --- HandleFriendRequest ---
+message HandleFriendRequestRequest {
+  string user_id    = 1; // 当前用户 ID
+  string request_id = 2; // 申请 ID
+  int32  action     = 3; // 处理动作：1=同意 2=拒绝
+}
+
+message HandleFriendRequestResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetFriendRequests ---
+message GetFriendRequestsRequest {
+  string            user_id    = 1; // 当前用户 ID
+  common.Pagination pagination = 2; // 分页参数
+}
+
+message GetFriendRequestsResponse {
+  common.ResponseMeta          meta       = 1; // 响应元信息
+  repeated FriendRequestInfo   requests   = 2; // 好友申请列表
+  common.PaginationResult      pagination = 3; // 分页结果
+}
+
+// --- GetFriendList ---
+message GetFriendListRequest {
+  string            user_id         = 1; // 当前用户 ID
+  common.Pagination pagination      = 2; // 分页参数
+  string            friend_group_id = 3; // 按分组筛选（可选，为空返回全部）
+}
+
+message GetFriendListResponse {
+  common.ResponseMeta     meta       = 1; // 响应元信息
+  repeated FriendInfo     friends    = 2; // 好友列表
+  common.PaginationResult pagination = 3; // 分页结果
+}
+
+// --- DeleteFriend ---
+message DeleteFriendRequest {
+  string user_id   = 1; // 当前用户 ID
+  string friend_id = 2; // 要删除的好友用户 ID
+}
+
+message DeleteFriendResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- SetFriendRemark ---
+message SetFriendRemarkRequest {
+  string user_id   = 1; // 当前用户 ID
+  string friend_id = 2; // 好友用户 ID
+  string remark    = 3; // 备注名
+}
+
+message SetFriendRemarkResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- CheckFriendship ---
+message CheckFriendshipRequest {
+  string user_id        = 1; // 当前用户 ID
+  string target_user_id = 2; // 目标用户 ID
+}
+
+message CheckFriendshipResponse {
+  common.ResponseMeta   meta   = 1; // 响应元信息
+  common.RelationStatus status = 2; // 关系状态
+}
+
+// --- BatchCheckFriendship ---
+message BatchCheckFriendshipRequest {
+  string          user_id         = 1; // 当前用户 ID
+  repeated string target_user_ids = 2; // 目标用户 ID 列表
+}
+
+message BatchCheckFriendshipResponse {
+  common.ResponseMeta       meta    = 1; // 响应元信息
+  repeated FriendshipResult results = 2; // 检查结果列表
+}
+
+// --- CreateFriendGroup ---
+message CreateFriendGroupRequest {
+  string user_id    = 1; // 用户 ID
+  string name       = 2; // 分组名称
+  int32  sort_order = 3; // 排序权重
+}
+
+message CreateFriendGroupResponse {
+  common.ResponseMeta meta  = 1; // 响应元信息
+  FriendGroup         group = 2; // 创建的分组信息
+}
+
+// --- GetFriendGroups ---
+message GetFriendGroupsRequest {
+  string user_id = 1; // 用户 ID
+}
+
+message GetFriendGroupsResponse {
+  common.ResponseMeta  meta   = 1; // 响应元信息
+  repeated FriendGroup groups = 2; // 分组列表
+}
+
+// --- UpdateFriendGroup ---
+message UpdateFriendGroupRequest {
+  string user_id    = 1; // 用户 ID
+  string group_id   = 2; // 分组 ID
+  string name       = 3; // 新的分组名称（可选）
+  int32  sort_order = 4; // 新的排序权重（可选）
+}
+
+message UpdateFriendGroupResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- DeleteFriendGroup ---
+message DeleteFriendGroupRequest {
+  string user_id  = 1; // 用户 ID
+  string group_id = 2; // 分组 ID
+}
+
+message DeleteFriendGroupResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- MoveFriendToGroup ---
+message MoveFriendToGroupRequest {
+  string user_id         = 1; // 用户 ID
+  string friend_id       = 2; // 好友用户 ID
+  string friend_group_id = 3; // 目标分组 ID（空字符串表示移入"未分组"）
+}
+
+message MoveFriendToGroupResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- BlockUser ---
+message BlockUserRequest {
+  string user_id       = 1; // 当前用户 ID
+  string block_user_id = 2; // 要拉黑的用户 ID
+}
+
+message BlockUserResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- UnblockUser ---
+message UnblockUserRequest {
+  string user_id       = 1; // 当前用户 ID
+  string block_user_id = 2; // 要取消拉黑的用户 ID
+}
+
+message UnblockUserResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetBlockList ---
+message GetBlockListRequest {
+  string            user_id    = 1; // 当前用户 ID
+  common.Pagination pagination = 2; // 分页参数
+}
+
+message GetBlockListResponse {
+  common.ResponseMeta     meta       = 1; // 响应元信息
+  repeated BlockInfo      blocks     = 2; // 黑名单列表
+  common.PaginationResult pagination = 3; // 分页结果
+}
+
+// --- CheckBlockship ---
+message CheckBlockshipRequest {
+  string user_id   = 1; // 拉黑方用户 ID
+  string target_id = 2; // 被检查的目标用户 ID
+}
+
+message CheckBlockshipResponse {
+  common.ResponseMeta meta       = 1; // 响应元信息
+  bool                is_blocked = 2; // 是否已拉黑
+}
+
+// --- GetPendingFriendRequestCount （MED-09）---
+message GetPendingFriendRequestCountRequest {
+  string user_id = 1; // 用户 ID
+}
+
+message GetPendingFriendRequestCountResponse {
+  common.ResponseMeta meta  = 1; // 响应元信息
+  int64               count = 2; // 待处理的好友申请数量
+}

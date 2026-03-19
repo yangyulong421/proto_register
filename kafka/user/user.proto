@@ -1,0 +1,123 @@
+syntax = "proto3";
+package kafka.user;
+option go_package = "proto_register/kafka/user";
+
+import "common/common.proto";
+
+// ============================================================
+// 用户服务 Kafka 事件
+// ============================================================
+// 服务职责：
+//   管理用户注册、资料更新、头像变更、账号封禁与注销等
+//   用户生命周期事件，为其他服务提供用户状态变更通知。
+//
+// 生产 Topic：
+//   user.registered        — 用户注册
+//   user.profile.updated   — 资料更新
+//   user.avatar.updated    — 头像更新
+//   user.settings.updated  — 用户设置更新（隐私/通知/通用/安全）
+//   user.deactivated       — 账号注销
+//   user.banned            — 账号封禁
+//   user.unbanned          — 账号解禁
+//   user.stats             — 用户统计
+//
+// 消费 Topic：
+//   auth.register.success  — 注册成功（来自 auth）
+//   media.avatar.processed — 头像处理完成（来自 media）
+//   audit.user.violation   — 违规处理（来自 audit）
+//   config.changed         — 配置变更
+// ============================================================
+
+// ==================== 本地业务枚举 ====================
+
+// 性别
+enum Gender {
+  GENDER_UNSPECIFIED = 0; // 未指定
+  GENDER_MALE        = 1; // 男
+  GENDER_FEMALE      = 2; // 女
+  GENDER_OTHER       = 3; // 其他
+}
+
+// -------------------- 事件定义 --------------------
+
+// 用户注册事件 —— Topic: user.registered
+message UserRegisteredEvent {
+  common.EventHeader  header        = 1;  // 事件头部
+  string              user_id       = 2;  // 用户 ID
+  string              username      = 3;  // 用户名
+  string              nickname      = 4;  // 昵称
+  string              avatar        = 5;  // 头像 URL
+  Gender              gender        = 6;  // 性别
+  string              register_ip   = 7;  // 注册 IP 地址
+  int64               register_time = 8;  // 注册时间戳（毫秒）
+  common.PlatformType platform      = 9;  // 注册平台
+}
+
+// 用户资料更新事件 —— Topic: user.profile.updated
+message UserProfileUpdatedEvent {
+  common.EventHeader header         = 1; // 事件头部
+  string             user_id        = 2; // 用户 ID
+  map<string,string> updated_fields = 3; // 变更字段（key: 字段名, value: 新值）
+  int64              update_time    = 4; // 更新时间戳（毫秒）
+}
+
+// 用户头像更新事件 —— Topic: user.avatar.updated
+message UserAvatarUpdatedEvent {
+  common.EventHeader header      = 1; // 事件头部
+  string             user_id     = 2; // 用户 ID
+  string             old_avatar  = 3; // 旧头像 URL
+  string             new_avatar  = 4; // 新头像 URL
+  int64              update_time = 5; // 更新时间戳（毫秒）
+}
+
+// 账号注销事件 —— Topic: user.deactivated
+message UserDeactivatedEvent {
+  common.EventHeader header          = 1; // 事件头部
+  string             user_id         = 2; // 用户 ID
+  string             reason          = 3; // 注销原因
+  int64              deactivate_time = 4; // 注销时间戳（毫秒）
+}
+
+// 账号封禁事件 —— Topic: user.banned
+message UserBannedEvent {
+  common.EventHeader header       = 1; // 事件头部
+  string             user_id      = 2; // 被封禁用户 ID
+  string             reason       = 3; // 封禁原因
+  string             operator_id  = 4; // 操作人 ID（管理员）
+  int64              ban_duration = 5; // 封禁时长（秒，0 表示永久）
+  int64              expire_at    = 6; // 封禁过期时间戳（毫秒，0 表示永久）
+  int64              ban_time     = 7; // 封禁时间戳（毫秒）
+}
+
+// 账号解禁事件 —— Topic: user.unbanned
+message UserUnbannedEvent {
+  common.EventHeader header      = 1; // 事件头部
+  string             user_id     = 2; // 被解禁用户 ID
+  string             operator_id = 3; // 操作人 ID（管理员）
+  string             reason      = 4; // 解禁原因
+  int64              unban_time  = 5; // 解禁时间戳（毫秒）
+}
+
+// 用户设置更新事件 —— Topic: user.settings.updated
+// 用户修改隐私设置 / 通知设置 / 通用设置 / 安全设置后触发
+// Message 服务消费更新 msg:local:user_settings 缓存（allow_stranger_msg）
+// Push 服务消费更新 push:local:user_settings 缓存（推送偏好）
+message UserSettingsUpdatedEvent {
+  common.EventHeader  header          = 1; // 事件头部
+  string              user_id         = 2; // 用户 ID
+  string              settings_type   = 3; // 设置类型：privacy / notification / general / security
+  map<string, string> updated_fields  = 4; // 变更字段（key: 字段名, value: 新值）
+  int64               update_time     = 5; // 更新时间戳（毫秒）
+}
+
+// 用户统计事件 —— Topic: user.stats
+message UserStatsEvent {
+  common.EventHeader header             = 1; // 事件头部
+  int64              total_registered   = 2; // 统计周期内注册总数
+  int64              total_deactivated  = 3; // 统计周期内注销总数
+  int64              total_banned       = 4; // 统计周期内封禁总数
+  int64              total_unbanned     = 5; // 统计周期内解禁总数
+  int64              total_active_users = 6; // 当前活跃用户总数
+  int64              stats_time         = 7; // 统计时间戳（毫秒）
+  int64              period_seconds     = 8; // 统计周期（秒）
+}

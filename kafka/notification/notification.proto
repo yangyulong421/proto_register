@@ -1,0 +1,210 @@
+syntax = "proto3";
+package kafka.notification;
+option go_package = "proto_register/kafka/notification";
+
+import "common/common.proto";
+
+// =============================================================================
+// Notification 通知服务 Kafka 事件定义
+//
+// 通知服务负责系统通知、好友/群事件通知、运营通知等
+// 与 Push 服务的区别：Notification 负责通知的生成和管理，Push 负责投递
+//
+// 【生产的 Topic】
+//   1. notification.created       - 通知创建（Push 消费后投递给客户端）
+//   2. notification.read          - 通知已读
+//   3. notification.read.all      - 通知全部已读
+//   4. notification.deleted       - 通知删除
+//   5. notification.stats         - 通知统计
+//
+// 【消费的 Topic】
+//   1. relation.friend.request      - 好友申请（来自 relation，生成通知）
+//   2. relation.friend.accepted     - 好友通过（来自 relation）
+//   3. relation.friend.rejected     - 好友拒绝（来自 relation）
+//   4. relation.friend.deleted      - 好友删除（来自 relation）
+//   5. group.member.joined          - 群成员加入（来自 group）
+//   6. group.member.left            - 群成员退出（来自 group）
+//   7. group.member.kicked          - 群成员被踢（来自 group）
+//   8. group.member.role.changed    - 群成员角色变更（来自 group）
+//   9. group.member.mute.changed    - 群成员禁言变更（来自 group）
+//   10. group.transfer              - 群主转让（来自 group）
+//   11. group.application           - 入群申请（来自 group）
+//   12. group.application.handled   - 入群申请处理（来自 group）
+//   13. group.dissolved             - 群解散（来自 group）
+//   14. user.banned                 - 账号封禁（来自 user）
+//   15. auth.password.changed       - 密码修改安全通知（来自 auth）
+//   16. audit.risk.alert            - 风控告警（来自 audit，通知管理员）
+//   17. session.expired             - 会话过期（来自 session，安全通知）
+//   18. offline.queue.overflow      - 离线队列溢出（来自 offline_queue，通知用户）
+//   19. system.broadcast            - 系统广播（来自 config）
+//   20. config.changed              - 配置变更（来自 config）
+//   21. auth.login.success          - 新设备登录安全通知（来自 auth）
+//   22. user.deactivated            - 用户注销清理通知数据（来自 user）
+// =============================================================================
+
+// ============== 生产的事件 ==============
+
+// Topic: notification.created
+// 通知创建事件
+message NotificationCreatedEvent {
+  common.EventHeader      header          = 1;  // 事件头
+  string                  notification_id = 2;  // 通知 ID
+  string                  target_user_id  = 3;  // 通知接收者 ID
+  common.NotificationType type            = 4;  // 通知类型
+  string                  title           = 5;  // 通知标题
+  string                  content         = 6;  // 通知内容
+  string                  sender_id       = 7;  // 触发者 ID
+  string                  sender_nickname = 8;  // 触发者昵称
+  string                  sender_avatar   = 9;  // 触发者头像
+  string                  reference_id    = 10; // 关联业务 ID
+  map<string, string>     extra           = 11; // 扩展数据
+  int64                   create_time     = 12; // 创建时间
+  int64                   expire_time     = 13; // 过期时间（0 表示不过期）
+}
+
+// Topic: notification.read
+// 通知已读事件
+message NotificationReadEvent {
+  common.EventHeader header           = 1; // 事件头
+  string             user_id          = 2; // 用户 ID
+  repeated string    notification_ids = 3; // 已读通知 ID 列表
+  int64              read_time        = 4; // 已读时间
+}
+
+// Topic: notification.read.all
+// 通知全部已读事件
+message NotificationReadAllEvent {
+  common.EventHeader      header    = 1; // 事件头
+  string                  user_id   = 2; // 用户 ID
+  common.NotificationType type      = 3; // 通知类型（0 表示所有类型）
+  int64                   read_time = 4; // 已读时间
+  int32                   count     = 5; // 标记已读数量
+}
+
+// Topic: notification.deleted
+// 通知删除事件
+message NotificationDeletedEvent {
+  common.EventHeader header           = 1; // 事件头
+  string             user_id          = 2; // 用户 ID
+  repeated string    notification_ids = 3; // 删除的通知 ID 列表
+  int64              delete_time      = 4; // 删除时间
+}
+
+// Topic: notification.stats
+// 通知统计事件
+message NotificationStatsEvent {
+  common.EventHeader header        = 1;  // 事件头
+  string             server_id     = 2;  // 服务实例 ID
+  int64              period_start  = 3;  // 统计周期开始
+  int64              period_end    = 4;  // 统计周期结束
+  int64              created_count = 5;  // 创建通知数
+  int64              read_count    = 6;  // 已读通知数
+  int64              push_count    = 7;  // 推送通知数
+  int64              deleted_count = 8;  // 删除通知数
+  int64              expired_count = 9;  // 过期通知数
+}
+
+// ============== 消费的事件 ==============
+
+// Topic: relation.friend.rejected（来自 relation）
+message FriendRejectedForNotification {
+  common.EventHeader header       = 1; // 事件头
+  string             request_id   = 2; // 申请 ID
+  string             from_user_id = 3; // 原申请者 ID
+  string             to_user_id   = 4; // 拒绝者 ID
+  string             reason       = 5; // 拒绝原因
+  int64              reject_time  = 6; // 拒绝时间
+}
+
+// Topic: relation.friend.deleted（来自 relation）
+message FriendDeletedForNotification {
+  common.EventHeader header      = 1; // 事件头
+  string             operator_id = 2; // 操作者 ID
+  string             target_id   = 3; // 被删除者 ID
+  int64              delete_time = 4; // 删除时间
+}
+
+// Topic: group.member.left（来自 group）
+message GroupMemberLeftForNotification {
+  common.EventHeader header       = 1; // 事件头
+  string             group_id     = 2; // 群 ID
+  string             group_name   = 3; // 群名称
+  string             user_id      = 4; // 退出成员 ID
+  string             nickname     = 5; // 退出成员昵称
+  int32              member_count = 6; // 退出后群成员数
+  int64              leave_time   = 7; // 退出时间
+}
+
+// Topic: group.member.role.changed（来自 group）
+message GroupMemberRoleChangedForNotification {
+  common.EventHeader header      = 1; // 事件头
+  string             group_id    = 2; // 群 ID
+  string             operator_id = 3; // 操作者 ID
+  string             user_id     = 4; // 被变更成员 ID
+  string             old_role    = 5; // 原角色
+  string             new_role    = 6; // 新角色
+  int64              change_time = 7; // 变更时间
+}
+
+// Topic: group.member.mute.changed（来自 group）
+message GroupMemberMuteChangedForNotification {
+  common.EventHeader header      = 1; // 事件头
+  string             group_id    = 2; // 群 ID
+  string             operator_id = 3; // 操作者 ID
+  string             user_id     = 4; // 被禁言/解禁的成员 ID
+  bool               is_muted    = 5; // 是否禁言
+  int64              mute_until  = 6; // 禁言截止时间
+  int64              change_time = 7; // 变更时间
+}
+
+// Topic: group.transfer（来自 group）
+message GroupTransferForNotification {
+  common.EventHeader header        = 1; // 事件头
+  string             group_id      = 2; // 群 ID
+  string             old_owner_id  = 3; // 原群主 ID
+  string             new_owner_id  = 4; // 新群主 ID
+  int64              transfer_time = 5; // 转让时间
+}
+
+// Topic: auth.password.changed（来自 auth）
+message PasswordChangedForNotification {
+  common.EventHeader header      = 1; // 事件头
+  string             user_id     = 2; // 用户 ID
+  string             platform    = 3; // 操作平台
+  string             ip          = 4; // 操作 IP
+  string             change_type = 5; // 变更类型：reset / modify
+  int64              change_time = 6; // 变更时间
+}
+
+// Topic: audit.risk.alert（来自 audit）
+message RiskAlertForNotification {
+  common.EventHeader  header      = 1;  // 事件头
+  string              alert_id    = 2;  // 告警 ID
+  string              user_id     = 3;  // 涉及用户 ID
+  string              risk_type   = 4;  // 风险类型
+  string              risk_level  = 5;  // 风险等级
+  string              description = 6;  // 告警描述
+  map<string, string> evidence    = 7;  // 证据数据
+  string              action      = 8;  // 建议动作
+  int64               alert_time  = 9;  // 告警时间
+}
+
+// Topic: session.expired（来自 session）
+message SessionExpiredForNotification {
+  common.EventHeader header      = 1; // 事件头
+  string             session_id  = 2; // 会话 ID
+  string             user_id     = 3; // 用户 ID
+  string             platform    = 4; // 平台类型
+  string             device_id   = 5; // 设备 ID
+  int64              expire_time = 6; // 过期时间
+}
+
+// Topic: offline.queue.overflow（来自 offline_queue）
+message OfflineQueueOverflowForNotification {
+  common.EventHeader header        = 1; // 事件头
+  string             user_id       = 2; // 用户 ID
+  int64              queue_size    = 3; // 队列当前大小
+  int64              max_size      = 4; // 队列最大容量
+  int64              dropped_count = 5; // 丢弃消息数
+  int64              overflow_time = 6; // 溢出时间
+}

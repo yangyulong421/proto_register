@@ -1,0 +1,157 @@
+syntax = "proto3";
+
+package ack;
+
+option go_package = "proto_register/rpc/ack";
+
+import "common/common.proto";
+
+// =============================================================================
+// Ack 已读回执服务 — RPC 接口定义
+//
+// 核心职责：
+//   管理消息的已读状态和已读回执
+//   支持单聊已读、群聊已读（含已读用户列表）、批量已读
+//   维护每个用户在每个会话中的已读位置（read_seq）
+//   确认消息投递状态（内部服务间调用）
+//
+// 与 notify+sync 的协作：
+//   - 客户端拉取消息（PullMessages）后，上报已读位置
+//   - Ack 服务更新 read_seq → 通知 Session 服务清零未读
+//   - 已读回执通过 Push 服务以 sync notify 方式推送给消息发送者
+//
+// 多端已读同步：
+//   - 用户在设备 A 读了消息后，Ack 服务产出已读事件
+//   - Push 服务消费事件后，向用户的其他设备推送已读同步信号
+//   - 其他设备收到后自动更新本地已读状态和未读数
+// =============================================================================
+
+// ==================== 服务定义 ====================
+
+service AckService {
+  // 上报单聊已读（标记某会话消息已读到指定 seq）
+  rpc SendReadAck(SendReadAckRequest) returns (SendReadAckResponse);
+
+  // 批量上报多个会话已读
+  rpc BatchSendReadAck(BatchSendReadAckRequest) returns (BatchSendReadAckResponse);
+
+  // 上报群聊已读
+  rpc SendGroupReadAck(SendGroupReadAckRequest) returns (SendGroupReadAckResponse);
+
+  // 查询单条消息的已读状态
+  rpc GetReadStatus(GetReadStatusRequest) returns (GetReadStatusResponse);
+
+  // 获取用户在某会话中的已读位置
+  rpc GetConversationReadSeq(GetConversationReadSeqRequest) returns (GetConversationReadSeqResponse);
+
+  // 批量获取用户在多个会话中的已读位置
+  rpc BatchGetConversationReadSeq(BatchGetConversationReadSeqRequest) returns (BatchGetConversationReadSeqResponse);
+
+  // 获取群消息已读/未读用户列表
+  rpc GetMessageReadUsers(GetMessageReadUsersRequest) returns (GetMessageReadUsersResponse);
+
+  // 服务端消息投递确认（内部调用：Push 服务确认消息已到达客户端）
+  rpc ConfirmDelivered(ConfirmDeliveredRequest) returns (ConfirmDeliveredResponse);
+}
+
+// ==================== 请求/响应 ====================
+
+// --- SendReadAck ---
+message SendReadAckRequest {
+  string user_id         = 1; // 上报者用户 ID
+  string conversation_id = 2; // 会话 ID
+  string msg_id          = 3; // 最后已读的消息 ID
+  int64  read_seq        = 4; // 已读到的 seq 位置
+  string device_id       = 5; // 上报设备 ID（用于多端同步时排除当前设备）
+}
+
+message SendReadAckResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- BatchSendReadAck ---
+message BatchSendReadAckRequest {
+  string             user_id          = 1; // 上报者用户 ID
+  repeated string    conversation_ids = 2; // 会话 ID 列表
+  map<string, int64> read_seqs        = 3; // 每个会话的已读 seq（key=conversation_id）
+  string             device_id        = 4; // 上报设备 ID（多端同步）
+}
+
+message BatchSendReadAckResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- SendGroupReadAck ---
+message SendGroupReadAckRequest {
+  string user_id         = 1; // 上报者用户 ID
+  string group_id        = 2; // 群 ID
+  string conversation_id = 3; // 会话 ID
+  string msg_id          = 4; // 最后已读的消息 ID
+  int64  read_seq        = 5; // 已读到的 seq 位置
+  string device_id       = 6; // 上报设备 ID（多端同步）
+}
+
+message SendGroupReadAckResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetReadStatus ---
+message GetReadStatusRequest {
+  string msg_id  = 1; // 消息 ID
+  string user_id = 2; // 查询者用户 ID
+}
+
+message GetReadStatusResponse {
+  common.ResponseMeta meta      = 1; // 响应元信息
+  bool                is_read   = 2; // 是否已读
+  int64               read_time = 3; // 已读时间戳（毫秒，0 表示未读）
+}
+
+// --- GetConversationReadSeq ---
+message GetConversationReadSeqRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 会话 ID
+}
+
+message GetConversationReadSeqResponse {
+  common.ResponseMeta meta     = 1; // 响应元信息
+  int64               read_seq = 2; // 用户在该会话的已读 seq
+  int64               max_seq  = 3; // 该会话的最大 seq
+}
+
+// --- BatchGetConversationReadSeq ---
+message BatchGetConversationReadSeqRequest {
+  string          user_id          = 1; // 用户 ID
+  repeated string conversation_ids = 2; // 会话 ID 列表
+}
+
+message BatchGetConversationReadSeqResponse {
+  common.ResponseMeta meta      = 1; // 响应元信息
+  map<string, int64>  read_seqs = 2; // 每个会话的已读 seq
+  map<string, int64>  max_seqs  = 3; // 每个会话的最大 seq
+}
+
+// --- GetMessageReadUsers ---
+message GetMessageReadUsersRequest {
+  string msg_id   = 1; // 消息 ID
+  string group_id = 2; // 群 ID（仅群聊消息需要）
+}
+
+message GetMessageReadUsersResponse {
+  common.ResponseMeta       meta         = 1; // 响应元信息
+  repeated common.UserBrief read_users   = 2; // 已读用户列表
+  repeated common.UserBrief unread_users = 3; // 未读用户列表
+  int32                     read_count   = 4; // 已读人数
+  int32                     unread_count = 5; // 未读人数
+}
+
+// --- ConfirmDelivered ---
+message ConfirmDeliveredRequest {
+  string msg_id    = 1; // 消息 ID
+  string user_id   = 2; // 接收者用户 ID
+  int64  timestamp = 3; // 投递确认时间戳（毫秒）
+}
+
+message ConfirmDeliveredResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}

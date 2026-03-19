@@ -1,0 +1,153 @@
+syntax = "proto3";
+
+package session;
+
+option go_package = "proto_register/rpc/session";
+
+import "common/common.proto";
+
+// =============================================================================
+// Session 登录会话服务 — RPC 接口定义
+//
+// 核心职责：
+//   管理用户登录会话的完整生命周期
+//   包含：会话创建（登录后）、刷新、过期、销毁
+//   多端设备管理：踢出设备、查看已登录设备列表
+//   多端登录策略控制（同一平台互踢、最大设备数限制等）
+//
+// 职责边界：
+//   - Session 管理的是「登录会话」，而非「聊天会话」
+//   - 聊天会话列表（最近聊天、置顶、免打扰等）由 Conversation 服务管理
+//   - 登录认证（账号密码校验、Token 签发）由 Auth 服务负责
+//   - Auth 登录成功后调用 Session.CreateLoginSession 创建登录会话
+//   - 在线状态由 Presence 服务负责
+//
+// 与 Auth 的协作：
+//   - Auth.Login → 校验凭证 → Session.CreateLoginSession → 返回 Token
+//   - Auth.Logout → Session.InvalidateLoginSession → 销毁会话
+//   - Auth.RefreshToken → Session.RefreshLoginSession → 延长有效期
+// =============================================================================
+
+// ==================== 服务特有类型 ====================
+
+// 登录会话信息
+message LoginSession {
+  string              session_id  = 1;  // 登录会话 ID
+  string              user_id     = 2;  // 用户 ID
+  common.PlatformType platform    = 3;  // 登录平台
+  string              device_id   = 4;  // 设备唯一标识
+  string              device_name = 5;  // 设备名称
+  string              os_version  = 6;  // 操作系统版本
+  string              app_version = 7;  // 应用版本号
+  string              ip          = 8;  // 登录 IP 地址
+  int64               login_time  = 9;  // 登录时间戳（毫秒）
+  int64               last_active = 10; // 最后活跃时间戳（毫秒）
+  int64               expire_at   = 11; // 过期时间戳（毫秒）
+  bool                is_current  = 12; // 是否为当前请求的会话
+}
+
+// ==================== 服务定义 ====================
+
+service SessionService {
+  // 创建登录会话（Auth 登录成功后调用）
+  rpc CreateLoginSession(CreateLoginSessionRequest) returns (CreateLoginSessionResponse);
+
+  // 获取登录会话详情
+  rpc GetLoginSession(GetLoginSessionRequest) returns (GetLoginSessionResponse);
+
+  // 刷新登录会话（Auth 刷新 Token 时调用，延长有效期）
+  rpc RefreshLoginSession(RefreshLoginSessionRequest) returns (RefreshLoginSessionResponse);
+
+  // 销毁登录会话（Auth 登出时调用）
+  rpc InvalidateLoginSession(InvalidateLoginSessionRequest) returns (InvalidateLoginSessionResponse);
+
+  // 踢出指定设备（用户主动踢出其他设备）
+  rpc KickDevice(KickDeviceRequest) returns (KickDeviceResponse);
+
+  // 获取用户所有活跃登录设备列表
+  rpc GetLoginDevices(GetLoginDevicesRequest) returns (GetLoginDevicesResponse);
+
+  // 清理过期会话（内部定时任务调用）
+  rpc CleanExpiredSessions(CleanExpiredSessionsRequest) returns (CleanExpiredSessionsResponse);
+}
+
+// ==================== 请求/响应 ====================
+
+// --- CreateLoginSession ---
+message CreateLoginSessionRequest {
+  string              user_id     = 1; // 用户 ID
+  common.PlatformType platform    = 2; // 平台类型
+  string              device_id   = 3; // 设备唯一标识
+  string              device_name = 4; // 设备名称
+  string              os_version  = 5; // 操作系统版本
+  string              app_version = 6; // 应用版本号
+  string              ip          = 7; // 登录 IP
+}
+
+message CreateLoginSessionResponse {
+  common.ResponseMeta meta    = 1; // 响应元信息
+  LoginSession        session = 2; // 创建的登录会话
+  string              kicked_session_id = 3; // 被踢掉的旧会话 ID（同平台互踢时有值）
+}
+
+// --- GetLoginSession ---
+message GetLoginSessionRequest {
+  string session_id = 1; // 登录会话 ID
+}
+
+message GetLoginSessionResponse {
+  common.ResponseMeta meta    = 1; // 响应元信息
+  LoginSession        session = 2; // 会话详情
+}
+
+// --- RefreshLoginSession ---
+message RefreshLoginSessionRequest {
+  string session_id = 1; // 登录会话 ID
+  string device_id  = 2; // 设备 ID（校验用）
+}
+
+message RefreshLoginSessionResponse {
+  common.ResponseMeta meta          = 1; // 响应元信息
+  int64               new_expire_at = 2; // 新的过期时间
+}
+
+// --- InvalidateLoginSession ---
+message InvalidateLoginSessionRequest {
+  string user_id   = 1; // 用户 ID
+  string device_id = 2; // 设备 ID
+  string reason    = 3; // 销毁原因（logout / expired / kicked / banned）
+}
+
+message InvalidateLoginSessionResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- KickDevice ---
+message KickDeviceRequest {
+  string user_id          = 1; // 操作者用户 ID
+  string target_device_id = 2; // 被踢设备 ID
+}
+
+message KickDeviceResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetLoginDevices ---
+message GetLoginDevicesRequest {
+  string user_id = 1; // 用户 ID
+}
+
+message GetLoginDevicesResponse {
+  common.ResponseMeta    meta    = 1; // 响应元信息
+  repeated LoginSession  devices = 2; // 所有活跃的登录会话列表
+}
+
+// --- CleanExpiredSessions ---
+message CleanExpiredSessionsRequest {
+  int64 before_time = 1; // 清理此时间之前过期的会话（毫秒时间戳）
+}
+
+message CleanExpiredSessionsResponse {
+  common.ResponseMeta meta          = 1; // 响应元信息
+  int32               cleaned_count = 2; // 清理的会话数量
+}

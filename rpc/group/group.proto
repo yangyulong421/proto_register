@@ -1,0 +1,386 @@
+syntax = "proto3";
+
+package group;
+
+option go_package = "proto_register/rpc/group";
+
+import "common/common.proto";
+
+// =============================================================================
+// Group 群组服务 — RPC 接口定义
+//
+// 核心职责：
+//   群组生命周期管理（创建/解散/转让）
+//   成员管理（邀请/踢出/退出/设置角色/禁言）
+//   群信息维护（名称/公告/头像/设置）
+//   入群审批（主动申请/被邀请）
+//
+// 职责边界：
+//   - 群消息由 Message 服务存储和分发
+//   - 群消息推送由 Push 服务负责
+//   - 群组变更通过 Kafka 事件通知其他服务
+// =============================================================================
+
+// ==================== 服务特有类型 ====================
+
+// 群组信息
+message GroupInfo {
+  string             group_id           = 1;  // 群组 ID
+  string             name               = 2;  // 群名称
+  string             avatar_url         = 3;  // 群头像 URL
+  string             description        = 4;  // 群描述
+  string             owner_id           = 5;  // 群主用户 ID
+  int32              member_count       = 6;  // 当前成员数
+  int32              max_members        = 7;  // 最大成员数
+  common.GroupStatus status             = 8;  // 群组状态
+  string             announcement       = 9;  // 群公告
+  bool               join_need_approve  = 10; // 加入群是否需要审批
+  bool               invite_need_approve = 11; // 邀请入群是否需要审批
+  int64              created_at         = 12; // 创建时间戳（毫秒）
+  int64              updated_at         = 13; // 更新时间戳（毫秒）
+  map<string, string> extra             = 14; // 扩展字段
+}
+
+// 群成员信息
+message GroupMemberInfo {
+  string                 group_id   = 1; // 群组 ID
+  string                 user_id    = 2; // 成员用户 ID
+  string                 nickname   = 3; // 群内昵称
+  string                 avatar_url = 4; // 成员头像 URL
+  common.GroupMemberRole role       = 5; // 成员角色
+  bool                   is_muted   = 6; // 是否被禁言
+  int64                  mute_until = 7; // 禁言截止时间戳（毫秒）
+  int64                  joined_at  = 8; // 加入时间戳（毫秒）
+  string                 invite_by  = 9; // 邀请人用户 ID
+}
+
+// 群申请信息
+message GroupApplicationInfo {
+  string                         application_id = 1;  // 申请 ID
+  string                         group_id       = 2;  // 群组 ID
+  string                         group_name     = 3;  // 群名称
+  string                         user_id        = 4;  // 申请/被邀请用户 ID
+  string                         user_nickname  = 5;  // 用户昵称
+  string                         user_avatar    = 6;  // 用户头像 URL
+  common.GroupApplicationType    type           = 7;  // 申请类型（加入/邀请）
+  common.GroupApplicationStatus  status         = 8;  // 申请状态
+  string                         message        = 9;  // 申请附言
+  string                         operator_id    = 10; // 处理人用户 ID
+  int64                          handle_time    = 11; // 处理时间戳（毫秒）
+  int64                          created_at     = 12; // 创建时间戳（毫秒）
+}
+
+// ==================== 服务定义 ====================
+
+service GroupService {
+  // ---- 群组生命周期 ----
+  // 创建群组
+  rpc CreateGroup(CreateGroupRequest) returns (CreateGroupResponse);
+  // 获取群组信息
+  rpc GetGroup(GetGroupRequest) returns (GetGroupResponse);
+  // 批量获取群组信息
+  rpc BatchGetGroup(BatchGetGroupRequest) returns (BatchGetGroupResponse);
+  // 更新群组信息
+  rpc UpdateGroup(UpdateGroupRequest) returns (UpdateGroupResponse);
+  // 解散群组
+  rpc DisbandGroup(DisbandGroupRequest) returns (DisbandGroupResponse);
+  // 转让群主
+  rpc TransferGroupOwner(TransferGroupOwnerRequest) returns (TransferGroupOwnerResponse);
+
+  // ---- 成员管理 ----
+  // 申请加入群组
+  rpc JoinGroup(JoinGroupRequest) returns (JoinGroupResponse);
+  // 退出群组
+  rpc LeaveGroup(LeaveGroupRequest) returns (LeaveGroupResponse);
+  // 踢出群成员
+  rpc KickGroupMember(KickGroupMemberRequest) returns (KickGroupMemberResponse);
+  // 邀请用户加入群组
+  rpc InviteToGroup(InviteToGroupRequest) returns (InviteToGroupResponse);
+  // 获取群成员列表
+  rpc GetGroupMembers(GetGroupMembersRequest) returns (GetGroupMembersResponse);
+  // 获取群成员 ID 列表（轻量级，仅返回 user_id，用于群消息推送路由等高频场景）
+  rpc GetGroupMemberIDs(GetGroupMemberIDsRequest) returns (GetGroupMemberIDsResponse);
+  // 获取单个群成员信息
+  rpc GetGroupMember(GetGroupMemberRequest) returns (GetGroupMemberResponse);
+  // 搜索群成员
+  rpc SearchGroupMembers(SearchGroupMembersRequest) returns (SearchGroupMembersResponse);
+
+  // ---- 成员设置 ----
+  // 设置群成员角色
+  rpc SetGroupMemberRole(SetGroupMemberRoleRequest) returns (SetGroupMemberRoleResponse);
+  // 设置群成员昵称
+  rpc SetGroupMemberNickname(SetGroupMemberNicknameRequest) returns (SetGroupMemberNicknameResponse);
+  // 禁言群成员
+  rpc MuteGroupMember(MuteGroupMemberRequest) returns (MuteGroupMemberResponse);
+  // 全员禁言/取消全员禁言
+  rpc MuteGroup(MuteGroupRequest) returns (MuteGroupResponse);
+
+  // ---- 群公告 ----
+  // 设置群公告
+  rpc SetGroupAnnouncement(SetGroupAnnouncementRequest) returns (SetGroupAnnouncementResponse);
+
+  // ---- 入群审批 ----
+  // 获取群申请列表（加入/邀请）
+  rpc GetGroupApplications(GetGroupApplicationsRequest) returns (GetGroupApplicationsResponse);
+  // 处理群申请（审批/拒绝）
+  rpc HandleGroupApplication(HandleGroupApplicationRequest) returns (HandleGroupApplicationResponse);
+
+  // ---- 用户群组 ----
+  // 获取用户所在群列表
+  rpc GetUserGroups(GetUserGroupsRequest) returns (GetUserGroupsResponse);
+}
+
+// ==================== 请求/响应 ====================
+
+// --- CreateGroup ---
+message CreateGroupRequest {
+  string          owner_id   = 1; // 创建者用户 ID
+  string          name       = 2; // 群名称
+  string          avatar_url = 3; // 群头像 URL
+  string          description = 4; // 群描述
+  repeated string member_ids = 5; // 初始成员用户 ID 列表（不含创建者）
+}
+
+message CreateGroupResponse {
+  common.ResponseMeta meta  = 1; // 响应元信息
+  GroupInfo            group = 2; // 群组信息
+}
+
+// --- GetGroup ---
+message GetGroupRequest {
+  string group_id = 1; // 群组 ID
+}
+
+message GetGroupResponse {
+  common.ResponseMeta meta  = 1; // 响应元信息
+  GroupInfo            group = 2; // 群组信息
+}
+
+// --- BatchGetGroup ---
+message BatchGetGroupRequest {
+  repeated string group_ids = 1; // 群组 ID 列表
+}
+
+message BatchGetGroupResponse {
+  common.ResponseMeta meta   = 1; // 响应元信息
+  repeated GroupInfo   groups = 2; // 群组信息列表
+}
+
+// --- UpdateGroup ---
+message UpdateGroupRequest {
+  string group_id            = 1; // 群组 ID
+  string operator_id         = 2; // 操作人用户 ID
+  string name                = 3; // 群名称（可选）
+  string avatar_url          = 4; // 群头像 URL（可选）
+  string description         = 5; // 群描述（可选）
+  bool   join_need_approve   = 6; // 加入群是否需要审批（可选）
+  bool   invite_need_approve = 7; // 邀请入群是否需要审批（可选）
+}
+
+message UpdateGroupResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- DisbandGroup ---
+message DisbandGroupRequest {
+  string group_id    = 1; // 群组 ID
+  string operator_id = 2; // 操作人用户 ID（须为群主）
+}
+
+message DisbandGroupResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- TransferGroupOwner ---
+message TransferGroupOwnerRequest {
+  string group_id     = 1; // 群组 ID
+  string owner_id     = 2; // 当前群主用户 ID
+  string new_owner_id = 3; // 新群主用户 ID
+}
+
+message TransferGroupOwnerResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- JoinGroup ---
+message JoinGroupRequest {
+  string group_id = 1; // 群组 ID
+  string user_id  = 2; // 申请人用户 ID
+  string message  = 3; // 申请附言
+}
+
+message JoinGroupResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- LeaveGroup ---
+message LeaveGroupRequest {
+  string group_id = 1; // 群组 ID
+  string user_id  = 2; // 退出的用户 ID
+}
+
+message LeaveGroupResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- KickGroupMember ---
+message KickGroupMemberRequest {
+  string          group_id    = 1; // 群组 ID
+  string          operator_id = 2; // 操作人用户 ID
+  repeated string member_ids  = 3; // 被踢用户 ID 列表
+}
+
+message KickGroupMemberResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- InviteToGroup ---
+message InviteToGroupRequest {
+  string          group_id    = 1; // 群组 ID
+  string          inviter_id  = 2; // 邀请人用户 ID
+  repeated string invitee_ids = 3; // 被邀请用户 ID 列表
+}
+
+message InviteToGroupResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetGroupMembers ---
+message GetGroupMembersRequest {
+  string                         group_id    = 1; // 群组 ID
+  common.Pagination              pagination  = 2; // 分页参数
+  repeated common.GroupMemberRole role_filter = 3; // 可选：按角色过滤（为空则查询全部成员）
+}
+
+message GetGroupMembersResponse {
+  common.ResponseMeta      meta       = 1; // 响应元信息
+  repeated GroupMemberInfo  members    = 2; // 群成员列表
+  common.PaginationResult  pagination = 3; // 分页结果
+}
+
+// --- GetGroupMemberIDs ---
+message GetGroupMemberIDsRequest {
+  string group_id = 1; // 群组 ID
+}
+
+message GetGroupMemberIDsResponse {
+  common.ResponseMeta meta       = 1; // 响应元信息
+  repeated string     member_ids = 2; // 群成员 ID 列表
+}
+
+// --- GetGroupMember ---
+message GetGroupMemberRequest {
+  string group_id = 1; // 群组 ID
+  string user_id  = 2; // 成员用户 ID
+}
+
+message GetGroupMemberResponse {
+  common.ResponseMeta meta   = 1; // 响应元信息
+  GroupMemberInfo      member = 2; // 群成员信息
+}
+
+// --- SearchGroupMembers ---
+message SearchGroupMembersRequest {
+  string            group_id   = 1; // 群组 ID
+  string            keyword    = 2; // 搜索关键词（匹配昵称等）
+  common.Pagination pagination = 3; // 分页参数
+}
+
+message SearchGroupMembersResponse {
+  common.ResponseMeta      meta       = 1; // 响应元信息
+  repeated GroupMemberInfo  members    = 2; // 匹配的群成员列表
+  common.PaginationResult  pagination = 3; // 分页结果
+}
+
+// --- SetGroupMemberRole ---
+message SetGroupMemberRoleRequest {
+  string                 group_id    = 1; // 群组 ID
+  string                 operator_id = 2; // 操作人用户 ID
+  string                 member_id   = 3; // 目标成员用户 ID
+  common.GroupMemberRole role        = 4; // 新角色
+}
+
+message SetGroupMemberRoleResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- SetGroupMemberNickname ---
+message SetGroupMemberNicknameRequest {
+  string group_id = 1; // 群组 ID
+  string user_id  = 2; // 用户 ID
+  string nickname = 3; // 群内昵称
+}
+
+message SetGroupMemberNicknameResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- MuteGroupMember ---
+message MuteGroupMemberRequest {
+  string group_id      = 1; // 群组 ID
+  string operator_id   = 2; // 操作人用户 ID
+  string member_id     = 3; // 被禁言成员用户 ID
+  int64  mute_duration = 4; // 禁言时长（秒），0 表示取消禁言
+}
+
+message MuteGroupMemberResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- MuteGroup ---
+message MuteGroupRequest {
+  string group_id    = 1; // 群组 ID
+  string operator_id = 2; // 操作人用户 ID
+  bool   is_mute     = 3; // 是否开启全员禁言
+}
+
+message MuteGroupResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- SetGroupAnnouncement ---
+message SetGroupAnnouncementRequest {
+  string group_id     = 1; // 群组 ID
+  string operator_id  = 2; // 操作人用户 ID
+  string announcement = 3; // 群公告内容
+}
+
+message SetGroupAnnouncementResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetGroupApplications ---
+message GetGroupApplicationsRequest {
+  string            group_id   = 1; // 群组 ID
+  common.Pagination pagination = 2; // 分页参数
+}
+
+message GetGroupApplicationsResponse {
+  common.ResponseMeta             meta         = 1; // 响应元信息
+  repeated GroupApplicationInfo   applications = 2; // 群申请列表
+  common.PaginationResult         pagination   = 3; // 分页结果
+}
+
+// --- HandleGroupApplication ---
+message HandleGroupApplicationRequest {
+  string group_id       = 1; // 群组 ID
+  string application_id = 2; // 申请 ID
+  string operator_id    = 3; // 操作人用户 ID
+  int32  action         = 4; // 处理动作：1=通过 2=拒绝
+}
+
+message HandleGroupApplicationResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetUserGroups ---
+message GetUserGroupsRequest {
+  string            user_id    = 1; // 用户 ID
+  common.Pagination pagination = 2; // 分页参数
+}
+
+message GetUserGroupsResponse {
+  common.ResponseMeta     meta       = 1; // 响应元信息
+  repeated GroupInfo       groups     = 2; // 群组列表
+  common.PaginationResult pagination = 3; // 分页结果
+}

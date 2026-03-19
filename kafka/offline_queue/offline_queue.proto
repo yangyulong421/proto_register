@@ -1,0 +1,90 @@
+syntax = "proto3";
+package kafka.offline_queue;
+option go_package = "proto_register/kafka/offline_queue";
+
+import "common/common.proto";
+
+// ============================================================
+// 离线队列服务 Kafka 事件
+// ============================================================
+// 服务职责：
+//   为离线用户暂存轻量级同步信号（SyncSignalEntry），而非完整消息。
+//   用户上线时批量推送同步信号，客户端根据信号主动拉取完整消息。
+//   确保离线期间不丢失任何消息通知。
+//
+// 生产 Topic：
+//   offline.dequeue.batch    — 批量出队（用户上线时批量推送）
+//   offline.queue.overflow   — 队列溢出告警
+//   offline.stats            — 统计
+//
+// 消费 Topic：
+//   push.offline.enqueue     — 离线同步信号入队（来自 push）
+//   conn.connected           — 用户连接建立（来自 connecte，触发离线信号出队）
+//   conn.disconnected        — 用户断开连接（来自 connecte，记录离线时间戳）
+//   msg.recalled             — 消息撤回（来自 message，移除已在队列中的撤回消息信号）
+//   user.deactivated         — 用户注销（来自 user，清空离线队列）
+//   config.changed           — 配置变更
+// ============================================================
+
+// -------------------- 事件定义 --------------------
+
+// 离线同步信号条目 —— 轻量级信号，不包含完整消息体
+message SyncSignalEntry {
+  string                  conversation_id   = 1;  // 会话 ID
+  common.ConversationType conversation_type = 2;  // 会话类型
+  int64                   max_seq           = 3;  // 该会话最新消息序号
+  string                  sender_id         = 4;  // 最后一条消息发送者 ID
+  string                  sender_name       = 5;  // 最后一条消息发送者昵称
+  common.MessageType      msg_type          = 6;  // 最后一条消息类型
+  string                  content_preview   = 7;  // 内容摘要预览（截断后的文本）
+  int32                   priority          = 8;  // 优先级（数值越大越优先）
+  int64                   enqueue_time      = 9;  // 入队时间戳（毫秒）
+}
+
+// 离线同步信号入队事件 —— Topic: push.offline.enqueue（消费）
+// push 服务发现用户离线后，将同步信号发送到此 Topic
+message SyncSignalEnqueueEvent {
+  common.EventHeader      header            = 1;  // 事件头部
+  string                  user_id           = 2;  // 目标用户 ID
+  string                  conversation_id   = 3;  // 会话 ID
+  common.ConversationType conversation_type = 4;  // 会话类型
+  int64                   max_seq           = 5;  // 该会话最新消息序号
+  string                  sender_id         = 6;  // 最后一条消息发送者 ID
+  string                  sender_name       = 7;  // 最后一条消息发送者昵称
+  common.MessageType      msg_type          = 8;  // 最后一条消息类型
+  string                  content_preview   = 9;  // 内容摘要预览
+  int32                   priority          = 10; // 优先级
+  int64                   enqueue_time      = 11; // 入队时间戳（毫秒）
+}
+
+// 批量出队事件 —— Topic: offline.dequeue.batch
+// 用户上线时，离线队列服务将暂存的同步信号批量推送
+message DequeueBatchEvent {
+  common.EventHeader         header       = 1; // 事件头部
+  string                     user_id      = 2; // 目标用户 ID
+  repeated SyncSignalEntry   signals      = 3; // 同步信号列表
+  int32                      total_count  = 4; // 信号总数
+  int64                      dequeue_time = 5; // 出队时间戳（毫秒）
+}
+
+// 队列溢出告警事件 —— Topic: offline.queue.overflow
+message QueueOverflowEvent {
+  common.EventHeader header        = 1; // 事件头部
+  string             user_id       = 2; // 用户 ID
+  int32              queue_size    = 3; // 当前队列大小
+  int32              max_size      = 4; // 队列上限
+  int32              dropped_count = 5; // 被丢弃的信号数量
+  int64              overflow_time = 6; // 溢出时间戳（毫秒）
+}
+
+// 离线队列统计事件 —— Topic: offline.stats
+message OfflineQueueStatsEvent {
+  common.EventHeader header          = 1; // 事件头部
+  int64              total_enqueued  = 2; // 统计周期内入队总数
+  int64              total_dequeued  = 3; // 统计周期内出队总数
+  int64              total_overflow  = 4; // 统计周期内溢出总数
+  int64              pending_users   = 5; // 有待推送信号的用户数
+  int64              pending_signals = 6; // 待推送信号总数
+  int64              stats_time      = 7; // 统计时间戳（毫秒）
+  int64              period_seconds  = 8; // 统计周期（秒）
+}

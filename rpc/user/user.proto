@@ -1,0 +1,207 @@
+syntax = "proto3";
+
+package user;
+
+option go_package = "proto_register/rpc/user";
+
+import "common/common.proto";
+
+// =============================================================================
+// User 用户服务 — RPC 接口定义
+//
+// 核心职责：
+//   管理用户生命周期、资料 CRUD、个人设置
+//
+// 职责边界：
+//   - 不处理搜索（属于 Search 服务）
+//   - 不查询在线状态（属于 Presence 服务）
+// =============================================================================
+
+// ==================== 服务特有类型 ====================
+
+// 用户信息
+message UserInfo {
+  string              user_id       = 1;  // 用户 ID
+  string              username      = 2;  // 用户名（登录名）
+  string              nickname      = 3;  // 昵称
+  string              avatar_url    = 4;  // 头像 URL
+  string              email         = 5;  // 邮箱地址
+  string              phone         = 6;  // 手机号
+  int32               gender        = 7;  // 性别：0=未知 1=男 2=女
+  string              signature     = 8;  // 个性签名
+  string              region        = 9;  // 地区
+  int64               birthday      = 10; // 生日，Unix 时间戳（毫秒）
+  int64               created_at    = 11; // 创建时间
+  int64               updated_at    = 12; // 更新时间
+  map<string, string> extra         = 13; // 扩展字段
+}
+
+// 用户设置（聚合全部子配置）
+message UserSettings {
+  string                  user_id      = 1; // 用户 ID
+  PrivacySettings         privacy      = 2; // 隐私设置
+  NotificationSettings    notification = 3; // 通知设置
+  GeneralSettings         general      = 4; // 通用设置
+  AccountSecuritySettings security     = 5; // 账号安全设置
+}
+
+// 隐私设置
+message PrivacySettings {
+  bool   allow_stranger_msg       = 1;  // 是否允许陌生人消息
+  bool   add_friend_need_confirm  = 2;  // 添加好友是否需要确认
+  bool   show_online_status       = 3;  // 是否展示在线状态
+  bool   allow_search_by_phone    = 4;  // 允许通过手机号搜索到我
+  bool   allow_search_by_username = 5;  // 允许通过用户名搜索到我
+  bool   allow_add_from_group     = 6;  // 允许通过群聊添加我为好友
+  bool   allow_search_by_qrcode   = 7;  // 允许通过二维码搜索到我
+  string moments_visibility       = 8;  // 朋友圈可见范围：all / three_days / half_year / one_month
+  bool   show_moments_to_stranger = 9;  // 是否展示朋友圈给陌生人
+  bool   hide_profile_from_blocked = 10; // 黑名单是否可见我的资料
+  bool   send_read_receipt        = 11; // 是否发送已读回执（true=发送，false=不发送）
+}
+
+// 通知设置
+message NotificationSettings {
+  bool   enabled             = 1;  // 全局通知开关
+  string sound               = 2;  // 通知提示音名称
+  bool   vibrate             = 3;  // 通知是否振动
+  bool   preview             = 4;  // 通知是否预览内容
+  bool   single_chat_notify  = 5;  // 单聊消息通知
+  bool   group_chat_notify   = 6;  // 群聊消息通知
+  bool   system_notify       = 7;  // 系统通知开关
+  string dnd_start_time      = 8;  // 免打扰开始时间（HH:mm）
+  string dnd_end_time        = 9;  // 免打扰结束时间（HH:mm）
+  bool   dnd_enabled         = 10; // 是否开启免打扰模式
+  bool   call_notification   = 11; // 来电提醒
+  bool   at_me_force_notify  = 12; // @我 消息是否强提醒
+}
+
+// 通用设置
+message GeneralSettings {
+  string language               = 1;  // 语言设置（如 zh-CN / en-US）
+  string font_size              = 2;  // 字体大小
+  string chat_background_url    = 3;  // 聊天背景图片 URL
+  bool   dark_mode              = 4;  // 是否开启深色模式
+  string auto_download_media    = 5;  // 自动下载媒体策略：always / wifi_only / never
+  string auto_play_video        = 6;  // 自动播放视频策略
+  string image_send_quality     = 7;  // 图片发送质量：original / standard / compressed
+  bool   send_sound_enabled     = 8;  // 是否开启消息发送音效
+  bool   earpiece_mode          = 9;  // 是否开启听筒模式
+  bool   auto_scroll_to_bottom  = 10; // 进入聊天是否自动滚动到底部
+}
+
+// 账号安全设置
+message AccountSecuritySettings {
+  bool   two_factor_enabled    = 1; // 是否开启两步验证
+  string two_factor_email      = 2; // 两步验证邮箱（脱敏展示）
+  bool   login_device_confirm  = 3; // 登录是否需要设备确认
+  int32  max_online_devices    = 4; // 允许同时在线的最大设备数
+  string bound_phone           = 5; // 绑定的手机号（脱敏展示）
+  string bound_email           = 6; // 绑定的邮箱（脱敏展示）
+  int64  last_password_change  = 7; // 上次修改密码时间
+}
+
+// ==================== 服务定义 ====================
+
+service UserService {
+  // 用户注册
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // 获取用户信息
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  // 批量获取用户信息
+  rpc BatchGetUser(BatchGetUserRequest) returns (BatchGetUserResponse);
+  // 更新用户资料
+  rpc UpdateUser(UpdateUserRequest) returns (UpdateUserResponse);
+  // 停用账户
+  rpc DeactivateUser(DeactivateUserRequest) returns (DeactivateUserResponse);
+  // 更新用户设置
+  rpc UpdateUserSettings(UpdateUserSettingsRequest) returns (UpdateUserSettingsResponse);
+  // 获取用户设置
+  rpc GetUserSettings(GetUserSettingsRequest) returns (GetUserSettingsResponse);
+}
+
+// ==================== 请求/响应 ====================
+
+// --- Register ---
+message RegisterRequest {
+  string              username   = 1; // 用户名（登录名）
+  string              password   = 2; // 密码
+  string              nickname   = 3; // 昵称
+  string              avatar_url = 4; // 头像 URL
+  string              email      = 5; // 邮箱地址
+  string              phone      = 6; // 手机号
+  common.PlatformType platform   = 7; // 注册平台
+}
+
+message RegisterResponse {
+  common.ResponseMeta meta    = 1; // 响应元信息
+  string              user_id = 2; // 注册成功后的用户 ID
+}
+
+// --- GetUser ---
+message GetUserRequest {
+  string user_id = 1; // 目标用户 ID
+}
+
+message GetUserResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+  UserInfo             user = 2; // 用户信息
+}
+
+// --- BatchGetUser ---
+message BatchGetUserRequest {
+  repeated string user_ids = 1; // 用户 ID 列表
+}
+
+message BatchGetUserResponse {
+  common.ResponseMeta meta  = 1; // 响应元信息
+  repeated UserInfo    users = 2; // 用户信息列表
+}
+
+// --- UpdateUser ---
+message UpdateUserRequest {
+  string              user_id    = 1;  // 用户 ID
+  string              nickname   = 2;  // 昵称（可选）
+  string              avatar_url = 3;  // 头像 URL（可选）
+  string              email      = 4;  // 邮箱地址（可选）
+  string              phone      = 5;  // 手机号（可选）
+  int32               gender     = 6;  // 性别
+  string              signature  = 7;  // 个性签名（可选）
+  string              region     = 8;  // 地区（可选）
+  int64               birthday   = 9;  // 生日
+  map<string, string> extra      = 10; // 扩展字段
+}
+
+message UpdateUserResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- DeactivateUser ---
+message DeactivateUserRequest {
+  string user_id = 1; // 用户 ID
+  string reason  = 2; // 停用原因
+}
+
+message DeactivateUserResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- UpdateUserSettings ---
+message UpdateUserSettingsRequest {
+  string       user_id  = 1; // 用户 ID
+  UserSettings settings = 2; // 用户设置内容
+}
+
+message UpdateUserSettingsResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetUserSettings ---
+message GetUserSettingsRequest {
+  string user_id = 1; // 用户 ID
+}
+
+message GetUserSettingsResponse {
+  common.ResponseMeta meta     = 1; // 响应元信息
+  UserSettings         settings = 2; // 用户设置
+}

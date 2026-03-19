@@ -1,0 +1,262 @@
+syntax = "proto3";
+package kafka.message;
+option go_package = "proto_register/kafka/message";
+
+import "common/common.proto";
+
+// =============================================================================
+// Message 服务 Kafka 事件定义
+//
+// Message 服务是消息系统的核心，负责消息的接收、验证、存储、分发
+//
+// 【notify+sync 架构下的事件流】
+//   1. 客户端发送消息 → Message 服务存储 → 产生 msg.stored 事件
+//   2. Push 服务消费 msg.stored → 发送轻量 sync notify 给在线用户
+//   3. 离线用户由 OfflineQueue 管理 sync signal
+//   4. Message 服务 **不** 直接推送消息内容给客户端
+//
+// 【生产的 Topic】
+//   1. msg.stored.single        - 单聊消息持久化成功
+//   2. msg.stored.group         - 群聊消息持久化成功
+//   3. msg.recalled             - 消息撤回完成
+//   4. msg.deleted              - 消息删除完成
+//   5. msg.forwarded            - 消息转发完成
+//   6. msg.moderation.request   - 内容审核请求
+//   7. msg.search.index         - 搜索索引更新
+//   8. msg.conversation.update  - 会话更新通知（给 Conversation 服务消费）
+//
+// 【消费的 Topic】
+//   1. msg.incoming.single        - 接收单聊消息（来自 connecte 上行）
+//   2. msg.incoming.group         - 接收群聊消息（来自 connecte 上行）
+//   3. media.process.result       - 媒体处理结果（来自 media）
+//   4. audit.moderation.result    - 内容审核结果（来自 audit）
+//   5. config.changed             - 配置变更（来自 config）
+//   6. config.sensitive.updated   - 敏感词库更新（来自 config）
+//   7. user.deactivated           - 用户注销（来自 user，清理消息关联数据）
+//   8. user.profile.updated       - 用户资料变更（来自 user，本地发送者缓存更新）
+//   9. user.settings.updated      - 用户设置变更（来自 user，消息发送策略本地缓存）
+//   10. relation.blocked          - 拉黑（来自 relation，本地拉黑缓存更新）
+//   11. relation.unblocked        - 取消拉黑（来自 relation，清除本地缓存）
+//   12. relation.friend.accepted  - 好友通过（来自 relation，本地好友关系缓存）
+//   13. relation.friend.deleted   - 好友删除（来自 relation，清除本地缓存）
+//   14. group.info.updated        - 群信息变更（来自 group，群名等本地缓存更新）
+//   15. group.dissolved           - 群解散（来自 group，清理群消息相关缓存）
+//   16. group.member.joined       - 群成员加入（来自 group，本地群成员缓存更新）
+//   17. group.member.left         - 群成员退出（来自 group，清除本地缓存）
+//   18. group.member.kicked       - 群成员被踢（来自 group，清除本地缓存）
+//   19. group.member.mute.changed - 群禁言变更（来自 group，禁言状态本地缓存）
+//   20. group.member.role.changed - 群角色变更（来自 group，角色权限本地缓存）
+//   21. group.mute.changed        - 全员禁言变更（来自 group，全员禁言状态缓存）
+//
+// 【职责边界说明】
+//   - 消息投递状态（DELIVERED / READ）由 ACK 服务独立维护
+//   - 关系链校验（是否拉黑）发送时通过 RPC 调用 Relation 服务
+//   - 群成员/禁言校验发送时通过 RPC 调用 Group 服务
+//   - 以上设计确保 Message 服务仅关注消息存储与处理的核心职责
+// =============================================================================
+
+// ==================== 本地业务类型 ====================
+
+// 引用/回复消息预览信息
+message QuoteInfo {
+  string             msg_id      = 1; // 被引用的消息 ID
+  string             sender_id   = 2; // 被引用消息的发送者 ID
+  string             sender_name = 3; // 被引用消息的发送者昵称
+  common.MessageType type        = 4; // 被引用消息的类型
+  string             preview     = 5; // 被引用消息的内容预览（截断 100 字符）
+}
+
+// 消息体
+message MessageBody {
+  common.MessageType type        = 1; // 消息类型
+  string             text        = 2; // 文本内容
+  common.MediaInfo   media       = 3; // 媒体信息
+  string             extra       = 4; // 扩展字段（JSON）
+  repeated string    at_user_ids = 5; // @的用户 ID 列表
+  QuoteInfo          quote       = 6; // 引用/回复的消息信息
+  bool               at_all      = 7; // 是否 @全体成员（群聊适用）
+}
+
+// ============== 生产的事件 ==============
+
+// Topic: msg.stored.single | msg.stored.group
+// 消息持久化成功事件（notify+sync 的起点）
+// Push 服务消费此事件后，向收件人发送轻量 sync notify
+message MsgStoredEvent {
+  common.EventHeader      header             = 1;  // 事件头
+  string                  msg_id             = 2;  // 服务端消息 ID
+  string                  client_msg_id      = 3;  // 客户端消息 ID
+  string                  conversation_id    = 4;  // 会话 ID
+  common.ConversationType conversation_type  = 5;  // 会话类型
+  string                  sender_id          = 6;  // 发送者 ID
+  string                  receiver_id        = 7;  // 接收者 ID（单聊 user_id，群聊 group_id）
+  common.MessageType      msg_type           = 8;  // 消息类型
+  string                  content_preview    = 9;  // 内容预览（截断 100 字符）
+  common.MessageStatus    status             = 10; // 消息状态
+  int64                   seq                = 11; // 消息序号
+  int64                   send_time          = 12; // 发送时间戳（毫秒）
+  int64                   server_time        = 13; // 服务端处理时间戳（毫秒）
+  string                  sender_nickname    = 14; // 发送者昵称（冗余）
+  string                  sender_avatar      = 15; // 发送者头像（冗余）
+  string                  group_id           = 16; // 群 ID（群聊时有值）
+  int32                   group_member_count = 17; // 群成员数（群聊时有值，用于扇出判断）
+  bool                    has_at             = 18; // 是否包含 @
+  repeated string         at_user_ids        = 19; // @的用户 ID 列表
+  string                  extra              = 20; // 扩展字段
+  bool                    has_at_all         = 21; // 是否 @全体成员
+}
+
+// Topic: msg.recalled
+// 消息撤回事件
+message MsgRecalledEvent {
+  common.EventHeader      header            = 1;  // 事件头
+  string                  msg_id            = 2;  // 被撤回的消息 ID
+  string                  conversation_id   = 3;  // 会话 ID
+  common.ConversationType conversation_type = 4;  // 会话类型
+  string                  sender_id         = 5;  // 撤回操作者 ID
+  string                  receiver_id       = 6;  // 接收者 ID
+  int64                   original_seq      = 7;  // 被撤回消息的 seq
+  int64                   recall_time       = 8;  // 撤回时间戳
+  string                  group_id          = 9;  // 群 ID（群聊时有值）
+  repeated string         notify_user_ids   = 10; // 需要通知的用户 ID 列表
+}
+
+// Topic: msg.deleted
+// 消息删除事件
+message MsgDeletedEvent {
+  common.EventHeader header          = 1; // 事件头
+  string             user_id         = 2; // 删除操作者 ID
+  repeated string    msg_ids         = 3; // 被删除的消息 ID 列表
+  string             conversation_id = 4; // 会话 ID
+  int64              delete_time     = 5; // 删除时间戳
+}
+
+// Topic: msg.forwarded
+// 消息转发事件
+message MsgForwardedEvent {
+  common.EventHeader       header          = 1; // 事件头
+  string                   sender_id       = 2; // 转发者 ID
+  string                   original_msg_id = 3; // 原始消息 ID
+  repeated ForwardTarget   targets         = 4; // 转发目标列表
+  int64                    forward_time    = 5; // 转发时间戳
+}
+
+// 转发目标
+message ForwardTarget {
+  string                  target_id         = 1; // 目标 ID
+  common.ConversationType conversation_type = 2; // 目标会话类型
+  string                  new_msg_id        = 3; // 新生成的消息 ID
+  string                  conversation_id   = 4; // 目标会话 ID
+}
+
+// Topic: msg.conversation.update
+// 会话更新通知（Conversation 服务消费，更新最近聊天列表）
+message MsgConversationUpdateEvent {
+  common.EventHeader      header            = 1;  // 事件头
+  string                  conversation_id   = 2;  // 会话 ID
+  common.ConversationType conversation_type = 3;  // 会话类型
+  string                  msg_id            = 4;  // 消息 ID
+  string                  content_preview   = 5;  // 内容预览
+  common.MessageType      message_type      = 6;  // 消息类型
+  string                  sender_id         = 7;  // 发送者 ID
+  string                  sender_nickname   = 8;  // 发送者昵称
+  int64                   seq               = 9;  // 消息 seq
+  int64                   send_time         = 10; // 发送时间
+  repeated string         affected_user_ids = 11; // 需要更新的用户 ID 列表
+  string                  update_type       = 12; // 更新类型：new_msg / recall / delete
+}
+
+// Topic: msg.moderation.request
+// 内容审核请求
+message MsgModerationRequestEvent {
+  common.EventHeader      header            = 1;  // 事件头
+  string                  msg_id            = 2;  // 消息 ID
+  string                  sender_id         = 3;  // 发送者 ID
+  string                  receiver_id       = 4;  // 接收者 ID
+  common.ConversationType conversation_type = 5;  // 会话类型
+  string                  content_type      = 6;  // 内容类型：text / image / video / file
+  string                  text_content      = 7;  // 文本内容（文本消息时）
+  string                  media_url         = 8;  // 媒体 URL（媒体消息时）
+  string                  media_id          = 9;  // 媒体 ID
+  int64                   send_time         = 10; // 发送时间
+}
+
+// Topic: msg.search.index
+// 搜索索引更新
+message MsgSearchIndexEvent {
+  common.EventHeader      header            = 1;  // 事件头
+  string                  action            = 2;  // 动作：create / update / delete
+  string                  msg_id            = 3;  // 消息 ID
+  string                  conversation_id   = 4;  // 会话 ID
+  common.ConversationType conversation_type = 5;  // 会话类型
+  string                  sender_id         = 6;  // 发送者 ID
+  string                  sender_nickname   = 7;  // 发送者昵称
+  common.MessageType      message_type      = 8;  // 消息类型
+  string                  text_content      = 9;  // 文本内容（用于全文索引）
+  string                  file_name         = 10; // 文件名
+  int64                   send_time         = 11; // 发送时间
+  string                  group_id          = 12; // 群 ID
+  repeated string         at_user_ids       = 13; // @用户列表
+}
+
+// ============== 消费的事件 ==============
+
+// Topic: msg.incoming.single | msg.incoming.group（来自 connecte 上行）
+message MsgIncomingEvent {
+  common.EventHeader      header            = 1;  // 事件头
+  string                  client_msg_id     = 2;  // 客户端消息 ID
+  string                  sender_id         = 3;  // 发送者 ID
+  string                  receiver_id       = 4;  // 接收者 ID
+  common.ConversationType conversation_type = 5;  // 会话类型
+  MessageBody             body              = 6;  // 消息体
+  string                  extra             = 7;  // 扩展字段
+  int64                   client_send_time  = 8;  // 客户端发送时间
+  common.PlatformType     sender_platform   = 9;  // 发送者平台
+  string                  sender_device_id  = 10; // 发送者设备 ID
+  string                  client_ip         = 11; // 发送者 IP
+}
+
+// Topic: media.process.result（来自 media）
+// 媒体处理结果事件（合并 completed 和 failed，通过 status 区分）
+message MediaProcessResultForMsg {
+  common.EventHeader         header          = 1;  // 事件头
+  string                     media_id        = 2;  // 媒体 ID
+  string                     msg_id          = 3;  // 关联消息 ID
+  string                     conversation_id = 4;  // 会话 ID
+  common.MediaProcessStatus  status          = 5;  // 处理状态：COMPLETED / FAILED
+  // ---- completed 时有值 ----
+  string                     url             = 6;  // 处理后 URL
+  string                     thumbnail_url   = 7;  // 缩略图 URL
+  int32                      width           = 8;  // 宽度
+  int32                      height          = 9;  // 高度
+  int32                      duration        = 10; // 时长
+  // ---- failed 时有值 ----
+  string                     error_code      = 11; // 错误码
+  string                     error_msg       = 12; // 错误信息
+  int32                      retry_count     = 13; // 已重试次数
+}
+
+// Topic: audit.moderation.result（来自 audit）
+message AuditModerationResultForMsg {
+  common.EventHeader header     = 1; // 事件头
+  string             request_id = 2; // 审核请求 ID
+  string             msg_id     = 3; // 消息 ID
+  string             user_id    = 4; // 用户 ID
+  string             result     = 5; // 审核结果：pass / review / reject
+  string             reason     = 6; // 原因
+  repeated string    labels     = 7; // 命中的标签列表
+  double             confidence = 8; // 置信度
+  string             action     = 9; // 处置动作：pass / delete / mute
+}
+
+// Topic: config.sensitive.updated（来自 config）
+// 敏感词库更新，message 服务需要热加载新的敏感词
+message SensitiveWordsUpdatedForMsg {
+  common.EventHeader header        = 1; // 事件头
+  string             action        = 2; // 操作：add / remove / replace / reload
+  repeated string    added_words   = 3; // 新增敏感词列表
+  repeated string    removed_words = 4; // 删除敏感词列表
+  string             category      = 5; // 分类
+  int32              total_count   = 6; // 更新后总词数
+  int64              update_time   = 7; // 更新时间
+}

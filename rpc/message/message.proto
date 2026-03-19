@@ -1,0 +1,301 @@
+syntax = "proto3";
+
+package message;
+
+option go_package = "proto_register/rpc/message";
+
+import "common/common.proto";
+
+// =============================================================================
+// Message 消息服务 — RPC 接口定义
+//
+// 核心职责：
+//   消息的接收、校验、存储、序号分配、消息拉取
+//   消息撤回、删除、转发、合并转发
+//   配合 notify+sync 模式：客户端收到轻量 notify 后，调用 PullMessages 拉取真实消息
+//
+// 消息投递流程（notify+sync）：
+//   1. 客户端 A 调用 SendMessage → Message 服务存储 → 分配 seq → 返回 {msg_id, seq, server_time}
+//   2. Message 服务投递 Kafka 事件 msg.stored
+//   3. Push 服务消费事件 → 向客户端 B 发送轻量 sync notify（仅含 conversation_id + max_seq）
+//   4. 客户端 B 收到 notify → 调用 PullMessages(conversation_id, local_seq) 拉取新消息
+//   5. 客户端 B 拉取成功后上报已读 → Ack 服务
+//
+// 多端同步：
+//   - 发送者 A 的其他设备也会收到 sync notify，确保多端消息一致
+//   - Push 服务在消费 msg.stored 事件时，同时通知发送者的其他在线设备
+//
+// 消息 ID 生成策略：
+//   - msg_id 采用 Snowflake 算法生成全局唯一有序 ID（字符串格式）
+//   - client_msg_id 由客户端生成（建议 UUID v4），用于幂等去重
+//   - 幂等窗口：24 小时内相同 client_msg_id 的请求返回已有消息，不重复存储
+//
+// 注意：Message 服务不负责推送，推送由 Push 服务完成
+// =============================================================================
+
+// ==================== 服务特有类型 ====================
+
+// 引用/回复消息预览信息
+message QuoteInfo {
+  string             msg_id      = 1; // 被引用的消息 ID
+  string             sender_id   = 2; // 被引用消息的发送者 ID
+  string             sender_name = 3; // 被引用消息的发送者昵称
+  common.MessageType type        = 4; // 被引用消息的类型
+  string             preview     = 5; // 被引用消息的内容预览（截断 100 字符）
+}
+
+// 合并转发消息信息
+message MergeForwardInfo {
+  string                       title         = 1; // 合并标题（如 "张三和李四的聊天记录"）
+  repeated MergeForwardSummary items         = 2; // 消息摘要列表（最多展示 4 条）
+  string                       detail_msg_id = 3; // 详情消息 ID（点击"查看更多"时拉取完整记录）
+}
+
+// 合并转发摘要条目
+message MergeForwardSummary {
+  string sender_name = 1; // 发送者昵称
+  string content     = 2; // 消息内容预览
+}
+
+// 消息体（核心结构）
+message MessageBody {
+  common.MessageType type         = 1; // 消息类型
+  string             text         = 2; // 文本内容（文本消息时填充）
+  common.MediaInfo   media        = 3; // 媒体信息（图片/语音/视频/文件消息时填充）
+  string             extra        = 4; // 扩展字段（JSON 格式，自定义数据）
+  repeated string    at_user_ids  = 5; // @的用户 ID 列表（群聊适用）
+  QuoteInfo          quote        = 6; // 引用/回复的消息信息
+  bool               at_all       = 7; // 是否 @全体成员（群聊适用）
+  MergeForwardInfo   merge        = 8; // 合并转发信息（合并转发消息时填充）
+}
+
+// ==================== 服务定义 ====================
+
+service MessageService {
+  // 发送消息（核心接口）
+  // 存储消息并分配 seq，触发 notify+sync 流程
+  // 幂等机制：24h 内重复 client_msg_id 返回已有消息，不重复存储
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+
+  // 拉取消息（notify+sync 核心接口）
+  // 客户端收到 sync notify 后调用此接口拉取新消息
+  rpc PullMessages(PullMessagesRequest) returns (PullMessagesResponse);
+
+  // 获取单条消息详情
+  rpc GetMessage(GetMessageRequest) returns (GetMessageResponse);
+
+  // 获取历史消息（基于 seq 游标分页）
+  rpc GetHistoryMessages(GetHistoryMessagesRequest) returns (GetHistoryMessagesResponse);
+
+  // 获取会话消息（基于页码分页）
+  rpc GetMessagesByConversation(GetMessagesByConversationRequest) returns (GetMessagesByConversationResponse);
+
+  // 撤回消息
+  rpc RecallMessage(RecallMessageRequest) returns (RecallMessageResponse);
+
+  // 删除消息（仅对自己不可见，不影响对方）
+  rpc DeleteMessage(DeleteMessageRequest) returns (DeleteMessageResponse);
+
+  // 转发消息到指定会话
+  rpc ForwardMessage(ForwardMessageRequest) returns (ForwardMessageResponse);
+
+  // 合并转发消息（将多条消息合并为一条转发消息）
+  rpc MergeForwardMessage(MergeForwardMessageRequest) returns (MergeForwardMessageResponse);
+
+  // 批量发送消息（内部调用，如群消息扇出场景）
+  rpc BatchSendMessage(BatchSendMessageRequest) returns (BatchSendMessageResponse);
+
+  // 清空会话聊天记录（仅对自己不可见）
+  rpc ClearConversationMessages(ClearConversationMessagesRequest) returns (ClearConversationMessagesResponse);
+
+  // 批量拉取多个会话的新消息（用户上线/重连时批量拉取，消除 N 次 PullMessages 的 RPC 风暴）
+  // 10M 用户同时上线场景：每用户 1 次调用替代 N 次（N=活跃会话数），从 2 亿次降到 1000 万次 RPC
+  rpc BatchPullMessages(BatchPullMessagesRequest) returns (BatchPullMessagesResponse);
+}
+
+// ==================== 消息实体 ====================
+
+// 完整聊天消息结构
+message ChatMessage {
+  string                  msg_id            = 1;  // 服务端消息唯一 ID（Snowflake 算法生成）
+  string                  client_msg_id     = 2;  // 客户端消息 ID（用于去重/幂等）
+  string                  conversation_id   = 3;  // 会话 ID
+  common.ConversationType conversation_type = 4;  // 会话类型（单聊/群聊/系统）
+  string                  sender_id         = 5;  // 发送者用户 ID
+  string                  receiver_id       = 6;  // 接收者 ID（单聊为对方 user_id，群聊为 group_id）
+  MessageBody             body              = 7;  // 消息体
+  common.MessageStatus    status            = 8;  // 消息状态
+  int64                   seq               = 9;  // 会话内递增序号（用于 notify+sync 拉取）
+  int64                   send_time         = 10; // 客户端发送时间戳（毫秒）
+  int64                   server_time       = 11; // 服务端处理时间戳（毫秒）
+  string                  extra             = 12; // 扩展字段（JSON 格式）
+}
+
+// ==================== 请求/响应 ====================
+
+// --- SendMessage ---
+message SendMessageRequest {
+  string                  sender_id         = 1; // 发送者用户 ID
+  string                  receiver_id       = 2; // 接收者 ID（单聊为 user_id，群聊为 group_id）
+  common.ConversationType conversation_type = 3; // 会话类型
+  MessageBody             body              = 4; // 消息体
+  string                  client_msg_id     = 5; // 客户端消息 ID（幂等去重，24h 窗口内唯一）
+  string                  extra             = 6; // 扩展字段
+}
+
+message SendMessageResponse {
+  common.ResponseMeta meta        = 1; // 响应元信息
+  string              msg_id      = 2; // 服务端生成的消息 ID
+  int64               seq         = 3; // 分配的序号
+  int64               server_time = 4; // 服务端处理时间戳
+  bool                duplicate   = 5; // 是否为重复消息（幂等命中时为 true）
+}
+
+// --- PullMessages (notify+sync 核心) ---
+message PullMessagesRequest {
+  string user_id         = 1; // 拉取者用户 ID
+  string conversation_id = 2; // 会话 ID
+  int64  last_seq        = 3; // 客户端本地最大 seq（从此 seq 之后开始拉取）
+  int32  count           = 4; // 拉取条数，默认 20，最大 100
+}
+
+message PullMessagesResponse {
+  common.ResponseMeta  meta     = 1; // 响应元信息
+  repeated ChatMessage messages = 2; // 拉取到的消息列表（按 seq 升序）
+  bool                 has_more = 3; // 是否还有更多消息
+  int64                max_seq  = 4; // 当前会话的最大 seq
+}
+
+// --- GetMessage ---
+message GetMessageRequest {
+  string msg_id = 1; // 消息 ID
+}
+
+message GetMessageResponse {
+  common.ResponseMeta meta    = 1; // 响应元信息
+  ChatMessage         message = 2; // 消息详情
+}
+
+// --- GetHistoryMessages ---
+message GetHistoryMessagesRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 会话 ID
+  int64  last_seq        = 3; // 起始 seq（从此 seq 向前查历史）
+  int32  count           = 4; // 拉取条数
+  bool   reverse         = 5; // 是否反向（true: 从旧到新，false: 从新到旧）
+}
+
+message GetHistoryMessagesResponse {
+  common.ResponseMeta  meta     = 1; // 响应元信息
+  repeated ChatMessage messages = 2; // 历史消息列表
+  bool                 has_more = 3; // 是否还有更多历史消息
+  int64                min_seq  = 4; // 返回消息中的最小 seq
+  int64                max_seq  = 5; // 返回消息中的最大 seq
+}
+
+// --- GetMessagesByConversation ---
+message GetMessagesByConversationRequest {
+  string            conversation_id = 1; // 会话 ID
+  string            user_id         = 2; // 用户 ID（用于权限校验和个人删除过滤）
+  common.Pagination pagination      = 3; // 分页参数
+}
+
+message GetMessagesByConversationResponse {
+  common.ResponseMeta     meta       = 1; // 响应元信息
+  repeated ChatMessage    messages   = 2; // 消息列表
+  common.PaginationResult pagination = 3; // 分页结果
+}
+
+// --- RecallMessage ---
+message RecallMessageRequest {
+  string msg_id    = 1; // 要撤回的消息 ID
+  string sender_id = 2; // 操作者 ID（必须是消息发送者或群管理员）
+}
+
+message RecallMessageResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- DeleteMessage ---
+message DeleteMessageRequest {
+  string          user_id = 1; // 操作者用户 ID
+  repeated string msg_ids = 2; // 要删除的消息 ID 列表
+}
+
+message DeleteMessageResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- ForwardMessage ---
+message ForwardMessageRequest {
+  string                  sender_id       = 1; // 转发者用户 ID
+  string                  original_msg_id = 2; // 原始消息 ID
+  repeated string         target_ids      = 3; // 目标 ID 列表（user_id 或 group_id）
+  common.ConversationType target_type     = 4; // 目标会话类型
+}
+
+message ForwardMessageResponse {
+  common.ResponseMeta meta    = 1; // 响应元信息
+  repeated string     msg_ids = 2; // 每个目标生成的新消息 ID
+}
+
+// --- MergeForwardMessage ---
+message MergeForwardMessageRequest {
+  string                  sender_id   = 1; // 转发者用户 ID
+  repeated string         msg_ids     = 2; // 要合并的消息 ID 列表
+  string                  title       = 3; // 合并标题（如 "张三和李四的聊天记录"）
+  repeated string         target_ids  = 4; // 目标 ID 列表
+  common.ConversationType target_type = 5; // 目标会话类型
+}
+
+message MergeForwardMessageResponse {
+  common.ResponseMeta meta    = 1; // 响应元信息
+  repeated string     msg_ids = 2; // 每个目标生成的新消息 ID
+}
+
+// --- BatchSendMessage ---
+message BatchSendMessageRequest {
+  string                  sender_id         = 1; // 发送者用户 ID
+  repeated string         receiver_ids      = 2; // 接收者 ID 列表
+  common.ConversationType conversation_type = 3; // 会话类型
+  MessageBody             body              = 4; // 消息体
+  string                  client_msg_id     = 5; // 客户端消息 ID（批量去重 key 前缀）
+}
+
+message BatchSendMessageResponse {
+  common.ResponseMeta meta          = 1; // 响应元信息
+  repeated string     msg_ids       = 2; // 生成的消息 ID 列表
+  int32               success_count = 3; // 成功数量
+  int32               fail_count    = 4; // 失败数量
+}
+
+// --- ClearConversationMessages ---
+message ClearConversationMessagesRequest {
+  string user_id         = 1; // 操作者用户 ID
+  string conversation_id = 2; // 会话 ID
+}
+
+message ClearConversationMessagesResponse {
+  common.ResponseMeta meta      = 1; // 响应元信息
+  int64               clear_seq = 2; // 清空前的最大 seq
+}
+
+// --- BatchPullMessages ---
+// 用户上线/重连时批量拉取多个会话的增量消息，避免 N 次 PullMessages 造成 RPC 风暴
+message BatchPullMessagesRequest {
+  string           user_id               = 1; // 用户 ID
+  map<string, int64> conversation_seqs   = 2; // 每个会话 ID → 本地最大 seq，服务端返回 > seq 的消息
+  int32            max_per_conversation   = 3; // 每个会话最多拉取条数，默认 20，上限 50
+}
+
+// 单个会话的消息列表
+message ConversationMessages {
+  repeated MessageItem messages  = 1; // 增量消息列表（按 seq 升序）
+  int64               max_seq    = 2; // 该会话服务端最新 seq
+  bool                has_more   = 3; // 是否还有更多（截断时为 true）
+}
+
+message BatchPullMessagesResponse {
+  common.ResponseMeta                    meta          = 1; // 响应元信息
+  map<string, ConversationMessages>      conversations = 2; // 会话 ID → 消息列表
+}

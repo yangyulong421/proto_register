@@ -1,0 +1,105 @@
+syntax = "proto3";
+package kafka.session;
+option go_package = "proto_register/kafka/session";
+
+import "common/common.proto";
+
+// ============================================================
+// 会话管理服务 Kafka 事件（Session = 登录会话）
+// ============================================================
+// 服务职责：
+//   管理用户登录会话的完整生命周期，包括创建、刷新、过期和互踢。
+//   支持多端登录策略控制，维护用户的在线设备列表。
+//
+// 生产 Topic：
+//   session.created        — 会话创建
+//   session.expired        — 会话过期
+//   session.kicked         — 会话被踢（多端互踢）
+//   session.refreshed      — 会话刷新
+//   session.stats          — 会话统计
+//
+// 消费 Topic：
+//   auth.login.success     — 登录成功（来自 auth，创建会话）
+//   auth.logout            — 登出（来自 auth，销毁会话）
+//   auth.token.refreshed   — Token 刷新（来自 auth，延长会话有效期）
+//   conn.disconnected      — 连接断开（来自 connecte，更新会话状态）
+//   config.changed         — 配置变更
+// ============================================================
+
+// -------------------- 事件定义 --------------------
+
+// 会话创建事件 —— Topic: session.created
+message SessionCreatedEvent {
+  common.EventHeader  header      = 1;  // 事件头部
+  string              session_id  = 2;  // 会话 ID
+  string              user_id     = 3;  // 用户 ID
+  common.PlatformType platform    = 4;  // 登录平台
+  string              device_id   = 5;  // 设备 ID
+  string              device_name = 6;  // 设备名称
+  string              ip          = 7;  // 登录 IP 地址
+  int64               login_time  = 8;  // 登录时间戳（毫秒）
+  int64               expire_at   = 9;  // 会话过期时间戳（毫秒）
+}
+
+// 会话过期事件 —— Topic: session.expired
+message SessionExpiredEvent {
+  common.EventHeader  header      = 1; // 事件头部
+  string              session_id  = 2; // 会话 ID
+  string              user_id     = 3; // 用户 ID
+  common.PlatformType platform    = 4; // 平台类型
+  string              device_id   = 5; // 设备 ID
+  int64               expire_time = 6; // 过期时间戳（毫秒）
+  int64               created_at  = 7; // 会话创建时间戳（毫秒）
+}
+
+// 会话被踢事件 —— Topic: session.kicked
+// 多端登录互踢场景：同一平台新登录踢掉旧会话
+message SessionKickedEvent {
+  common.EventHeader  header         = 1; // 事件头部
+  string              session_id     = 2; // 被踢会话 ID
+  string              user_id        = 3; // 用户 ID
+  common.PlatformType platform       = 4; // 平台类型
+  string              device_id      = 5; // 被踢设备 ID
+  string              new_session_id = 6; // 新会话 ID（取代当前会话）
+  string              reason         = 7; // 踢出原因（多端互踢 / 管理员踢出等）
+  int64               kick_time      = 8; // 踢出时间戳（毫秒）
+}
+
+// 会话刷新事件 —— Topic: session.refreshed
+message SessionRefreshedEvent {
+  common.EventHeader  header        = 1; // 事件头部
+  string              session_id    = 2; // 会话 ID
+  string              user_id       = 3; // 用户 ID
+  common.PlatformType platform      = 4; // 平台类型
+  string              device_id     = 5; // 设备 ID
+  int64               old_expire_at = 6; // 旧过期时间戳（毫秒）
+  int64               new_expire_at = 7; // 新过期时间戳（毫秒）
+  int64               refresh_time  = 8; // 刷新时间戳（毫秒）
+}
+
+// 会话统计事件 —— Topic: session.stats
+message SessionStatsEvent {
+  common.EventHeader header          = 1; // 事件头部
+  int64              active_sessions = 2; // 当前活跃会话数
+  int64              total_created   = 3; // 统计周期内创建总数
+  int64              total_expired   = 4; // 统计周期内过期总数
+  int64              total_kicked    = 5; // 统计周期内踢出总数
+  int64              total_refreshed = 6; // 统计周期内刷新总数
+  int64              stats_time      = 7; // 统计时间戳（毫秒）
+  int64              period_seconds  = 8; // 统计周期（秒）
+}
+
+// ============== 消费的事件 ==============
+
+// Topic: auth.token.refreshed（来自 auth）
+// Token 刷新，延长登录会话有效期
+message TokenRefreshedForSession {
+  common.EventHeader  header        = 1; // 事件头
+  string              user_id       = 2; // 用户 ID
+  string              session_id    = 3; // 会话 ID
+  common.PlatformType platform      = 4; // 平台类型
+  string              device_id     = 5; // 设备 ID
+  int64               old_expire_at = 6; // 原过期时间
+  int64               new_expire_at = 7; // 新过期时间
+  int64               refresh_time  = 8; // 刷新时间
+}

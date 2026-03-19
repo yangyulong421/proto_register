@@ -1,0 +1,176 @@
+syntax = "proto3";
+
+package apigateway;
+
+option go_package = "proto_register/rpc/apigateway";
+
+import "common/common.proto";
+
+// =============================================================================
+// ApiGateway 客户端 HTTP 网关 — 接口定义
+//
+// 核心职责：
+//   作为客户端（App/Web）的统一 HTTP 入口
+//   下游转发：将客户端 HTTP 请求路由到对应的 gRPC 微服务
+//   数据聚合：聚合多个微服务数据，减少客户端请求次数
+//   提供客户端初始化数据、增量同步、长连接端点发现等聚合 API
+//
+// 接口类型：
+//   所有接口均通过 HTTP/HTTPS 暴露，不对外提供 gRPC 服务
+//   以下 proto 定义仅作为 API 契约（可通过 grpc-gateway 映射为 HTTP）
+//
+// 与其他网关的区别：
+//   - ApiGateway = 客户端 HTTP 网关（面向 App/Web 用户）
+//   - Connecte = 长连接网关（WebSocket/TCP，面向客户端实时通信）
+//
+// 职责边界：
+//   - 不持有业务状态，仅做转发和聚合
+//   - 路由/限流/IP 黑白名单等配置属于网关内部实现，不对外暴露 RPC
+//   - 认证校验通过调用 Auth.VerifyToken 完成
+// =============================================================================
+
+// ==================== 服务定义 ====================
+
+service ApiGatewayService {
+  // 获取长连接网关端点（WebSocket / TCP 地址）
+  rpc GetGatewayEndpoint(GetGatewayEndpointRequest) returns (GetGatewayEndpointResponse);
+
+  // 增量数据同步（客户端定期调用或重连后调用）
+  rpc SyncData(SyncDataRequest) returns (SyncDataResponse);
+
+  // 获取登录后初始化数据（首次登录或清缓存后调用）
+  rpc GetInitData(GetInitDataRequest) returns (GetInitDataResponse);
+
+  // 批量查询用户/群组/会话信息（减少多次请求）
+  rpc BatchQuery(BatchQueryRequest) returns (BatchQueryResponse);
+
+  // 上报客户端事件（崩溃日志、页面访问、性能指标等）
+  rpc ReportEvent(ReportEventRequest) returns (ReportEventResponse);
+
+  // 检查应用更新
+  rpc CheckUpdate(CheckUpdateRequest) returns (CheckUpdateResponse);
+
+  // 获取服务器时间戳（用于客户端校时）
+  rpc GetServerTime(GetServerTimeRequest) returns (GetServerTimeResponse);
+}
+
+// ==================== 请求/响应 ====================
+
+// --- GetGatewayEndpoint ---
+message GetGatewayEndpointRequest {
+  string              user_id        = 1; // 用户 ID
+  common.PlatformType platform       = 2; // 客户端平台类型
+  string              client_version = 3; // 客户端版本号
+  string              client_ip      = 4; // 客户端 IP（可选，用于就近接入）
+}
+
+message GetGatewayEndpointResponse {
+  common.ResponseMeta meta        = 1; // 响应元数据
+  string              ws_url      = 2; // WebSocket 连接地址
+  string              tcp_url     = 3; // TCP 连接地址
+  repeated string     backup_urls = 4; // 备用连接地址列表
+  string              token       = 5; // 连接鉴权令牌
+  int64               expire_time = 6; // 令牌过期时间戳
+}
+
+// --- SyncData ---
+message SyncDataRequest {
+  string user_id               = 1; // 用户 ID
+  int64  last_sync_time        = 2; // 上次同步时间戳
+  int64  conversation_version  = 3; // 会话数据版本号
+  int64  relation_version      = 4; // 关系链数据版本号
+  int64  group_version         = 5; // 群组数据版本号
+}
+
+message SyncDataResponse {
+  common.ResponseMeta meta               = 1;  // 响应元数据
+  bool                full_sync          = 2;  // 是否需要全量同步
+  bytes               conversations_data = 3;  // 会话增量数据（序列化字节）
+  bytes               relations_data     = 4;  // 关系链增量数据（序列化字节）
+  bytes               groups_data        = 5;  // 群组增量数据（序列化字节）
+  bytes               notifications_data = 6;  // 通知增量数据（序列化字节）
+  int64               server_time        = 7;  // 服务器当前时间戳
+  bytes               user_info          = 8;  // 用户基本信息
+  bytes               user_settings      = 9;  // 用户设置
+  int64               total_unread       = 10; // 总未读数
+  bytes               presence_data      = 11; // 好友在线状态
+  bytes               offline_signals    = 12; // 离线信号数据
+  int64               offline_signal_cnt = 13; // 离线信号数量
+  bytes               feature_flags      = 14; // 功能开关
+  int64               unread_notif_cnt   = 15; // 未读通知数
+  bool                partial            = 20; // 是否部分成功（MED-04: 某些下游服务超时/熔断时为 true）
+  repeated string     failed_services    = 21; // 失败的服务列表（客户端可单独重试这些数据）
+}
+
+// --- GetInitData ---
+message GetInitDataRequest {
+  string              user_id        = 1; // 用户 ID
+  common.PlatformType platform       = 2; // 客户端平台类型
+  string              client_version = 3; // 客户端版本号
+}
+
+message GetInitDataResponse {
+  common.ResponseMeta meta                 = 1; // 响应元数据
+  bytes               user_info            = 2; // 用户基本信息（序列化字节）
+  bytes               user_settings        = 3; // 用户设置（序列化字节）
+  int64               total_unread         = 4; // 总未读消息数
+  int32               friend_request_count = 5; // 好友请求待处理数
+  int64               server_time          = 6; // 服务器当前时间戳
+}
+
+// --- BatchQuery ---
+message BatchQueryRequest {
+  repeated string user_ids         = 1; // 用户 ID 列表
+  repeated string group_ids        = 2; // 群组 ID 列表
+  repeated string conversation_ids = 3; // 会话 ID 列表
+}
+
+message BatchQueryResponse {
+  common.ResponseMeta meta          = 1; // 响应元数据
+  map<string, bytes>  users         = 2; // 用户信息映射（key=用户 ID）
+  map<string, bytes>  groups        = 3; // 群组信息映射（key=群组 ID）
+  map<string, bytes>  conversations = 4; // 会话信息映射（key=会话 ID）
+}
+
+// --- ReportEvent ---
+message ReportEventRequest {
+  string              user_id        = 1; // 用户 ID
+  string              event_type     = 2; // 事件类型（app_open / app_close / page_view / crash）
+  string              event_data     = 3; // 事件数据（JSON 格式）
+  common.PlatformType platform       = 4; // 客户端平台类型
+  string              client_version = 5; // 客户端版本号
+  int64               event_time     = 6; // 事件发生时间戳
+}
+
+message ReportEventResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}
+
+// --- CheckUpdate ---
+message CheckUpdateRequest {
+  common.PlatformType platform        = 1; // 客户端平台类型
+  string              current_version = 2; // 当前客户端版本号
+  string              channel         = 3; // 渠道标识
+}
+
+message CheckUpdateResponse {
+  common.ResponseMeta meta           = 1; // 响应元数据
+  bool                has_update     = 2; // 是否有新版本
+  string              latest_version = 3; // 最新版本号
+  bool                force_update   = 4; // 是否强制更新
+  string              download_url   = 5; // 更新下载地址
+  string              release_notes  = 6; // 更新说明
+  int64               package_size   = 7; // 安装包大小（字节）
+  string              md5            = 8; // 安装包 MD5 校验值
+}
+
+// --- GetServerTime ---
+message GetServerTimeRequest {
+  int64 client_time = 1; // 客户端本地时间戳（用于计算时差）
+}
+
+message GetServerTimeResponse {
+  common.ResponseMeta meta        = 1; // 响应元数据
+  int64               server_time = 2; // 服务器当前时间戳（毫秒）
+  int64               time_diff   = 3; // 客户端与服务器的时间差（毫秒）
+}

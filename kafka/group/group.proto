@@ -1,0 +1,207 @@
+syntax = "proto3";
+package kafka.group;
+option go_package = "proto_register/kafka/group";
+
+import "common/common.proto";
+
+// =============================================================================
+// Group 群组服务 Kafka 事件定义
+//
+// 群组服务管理群的生命周期、成员管理、群设置等
+//
+// 【生产的 Topic】
+//   1. group.created              - 群创建
+//   2. group.dissolved            - 群解散
+//   3. group.info.updated         - 群信息更新
+//   4. group.member.joined        - 成员加入
+//   5. group.member.left          - 成员退出
+//   6. group.member.kicked        - 成员被踢
+//   7. group.member.role.changed  - 成员角色变更
+//   8. group.member.mute.changed  - 成员禁言状态变更
+//   9. group.mute.changed         - 群全员禁言变更
+//   10. group.transfer            - 群主转让
+//   11. group.application         - 入群申请
+//   12. group.application.handled - 入群申请处理
+//   13. group.stats               - 群组统计
+//
+// 【消费的 Topic】
+//   1. user.deactivated           - 账号注销（来自 user，清理群成员）
+//   2. user.banned                - 账号封禁（来自 user）
+//   3. audit.content.violation    - 内容违规（来自 audit）
+//   4. media.avatar.processed     - 群头像处理完成（来自 media）
+//   5. config.changed             - 配置变更（来自 config）
+// =============================================================================
+
+// ==================== 本地业务枚举 ====================
+
+// 入群方式枚举
+enum JoinType {
+  JOIN_TYPE_UNSPECIFIED = 0; // 未指定
+  JOIN_TYPE_INVITED     = 1; // 被邀请
+  JOIN_TYPE_APPLIED     = 2; // 主动申请
+  JOIN_TYPE_QRCODE      = 3; // 扫码加入
+  JOIN_TYPE_LINK        = 4; // 链接加入
+}
+
+// ============== 生产的事件 ==============
+
+// Topic: group.created
+// 群创建事件
+message GroupCreatedEvent {
+  common.EventHeader header          = 1;  // 事件头
+  string             group_id        = 2;  // 群 ID
+  string             group_name      = 3;  // 群名称
+  string             group_avatar    = 4;  // 群头像
+  string             creator_id      = 5;  // 创建者 ID
+  string             creator_name    = 6;  // 创建者昵称
+  repeated string    init_member_ids = 7;  // 初始成员 ID 列表
+  int32              member_count    = 8;  // 成员数
+  int64              create_time     = 9;  // 创建时间
+  string             description     = 10; // 群描述
+}
+
+// Topic: group.dissolved
+// 群解散事件
+message GroupDissolvedEvent {
+  common.EventHeader header        = 1; // 事件头
+  string             group_id      = 2; // 群 ID
+  string             group_name    = 3; // 群名称
+  string             operator_id   = 4; // 操作者 ID
+  int32              member_count  = 5; // 解散时成员数
+  int64              dissolve_time = 6; // 解散时间
+}
+
+// Topic: group.info.updated
+// 群信息更新事件
+message GroupInfoUpdatedEvent {
+  common.EventHeader  header         = 1; // 事件头
+  string              group_id       = 2; // 群 ID
+  string              operator_id    = 3; // 操作者 ID
+  map<string, string> updated_fields = 4; // 变更字段
+  int64               update_time    = 5; // 更新时间
+}
+
+// Topic: group.member.joined
+// 成员加入事件
+message GroupMemberJoinedEvent {
+  common.EventHeader header       = 1; // 事件头
+  string             group_id     = 2; // 群 ID
+  string             group_name   = 3; // 群名称
+  string             user_id      = 4; // 新成员 ID
+  string             nickname     = 5; // 新成员昵称
+  string             inviter_id   = 6; // 邀请人 ID（邀请加入时有值）
+  JoinType           join_type    = 7; // 加入方式
+  int32              member_count = 8; // 加入后群成员数
+  int64              join_time    = 9; // 加入时间
+}
+
+// Topic: group.member.left
+// 成员退出事件
+message GroupMemberLeftEvent {
+  common.EventHeader header       = 1; // 事件头
+  string             group_id     = 2; // 群 ID
+  string             group_name   = 3; // 群名称
+  string             user_id      = 4; // 退出成员 ID
+  string             nickname     = 5; // 退出成员昵称
+  int32              member_count = 6; // 退出后群成员数
+  int64              leave_time   = 7; // 退出时间
+}
+
+// Topic: group.member.kicked
+// 成员被踢事件
+message GroupMemberKickedEvent {
+  common.EventHeader header       = 1; // 事件头
+  string             group_id     = 2; // 群 ID
+  string             group_name   = 3; // 群名称
+  string             operator_id  = 4; // 操作者 ID（踢人者）
+  repeated string    kicked_ids   = 5; // 被踢成员 ID 列表
+  string             reason       = 6; // 踢出原因
+  int32              member_count = 7; // 踢出后群成员数
+  int64              kick_time    = 8; // 踢出时间
+}
+
+// Topic: group.member.role.changed
+// 成员角色变更事件
+message GroupMemberRoleChangedEvent {
+  common.EventHeader    header      = 1; // 事件头
+  string                group_id    = 2; // 群 ID
+  string                operator_id = 3; // 操作者 ID
+  string                user_id     = 4; // 被变更成员 ID
+  common.GroupMemberRole old_role   = 5; // 原角色
+  common.GroupMemberRole new_role   = 6; // 新角色
+  int64                 change_time = 7; // 变更时间
+}
+
+// Topic: group.member.mute.changed
+// 成员禁言状态变更事件
+message GroupMemberMuteChangedEvent {
+  common.EventHeader header      = 1; // 事件头
+  string             group_id    = 2; // 群 ID
+  string             operator_id = 3; // 操作者 ID
+  string             user_id     = 4; // 被禁言/解禁成员 ID
+  bool               is_muted    = 5; // 是否禁言
+  int64              mute_until  = 6; // 禁言到期时间（0 表示永久或解禁）
+  int64              change_time = 7; // 变更时间
+}
+
+// Topic: group.mute.changed
+// 群全员禁言变更事件
+message GroupMuteChangedEvent {
+  common.EventHeader header      = 1; // 事件头
+  string             group_id    = 2; // 群 ID
+  string             operator_id = 3; // 操作者 ID
+  bool               is_muted    = 4; // 是否全员禁言
+  int64              change_time = 5; // 变更时间
+}
+
+// Topic: group.transfer
+// 群主转让事件
+message GroupTransferEvent {
+  common.EventHeader header        = 1; // 事件头
+  string             group_id      = 2; // 群 ID
+  string             old_owner_id  = 3; // 原群主 ID
+  string             new_owner_id  = 4; // 新群主 ID
+  int64              transfer_time = 5; // 转让时间
+}
+
+// Topic: group.application
+// 入群申请事件
+message GroupApplicationEvent {
+  common.EventHeader header         = 1; // 事件头
+  string             application_id = 2; // 申请 ID
+  string             group_id       = 3; // 群 ID
+  string             group_name     = 4; // 群名称
+  string             applicant_id   = 5; // 申请者 ID
+  string             applicant_name = 6; // 申请者昵称
+  string             message        = 7; // 申请留言
+  string             source         = 8; // 来源：search / qrcode / link / card
+  int64              apply_time     = 9; // 申请时间
+}
+
+// Topic: group.application.handled
+// 入群申请处理事件
+message GroupApplicationHandledEvent {
+  common.EventHeader header         = 1; // 事件头
+  string             application_id = 2; // 申请 ID
+  string             group_id       = 3; // 群 ID
+  string             applicant_id   = 4; // 申请者 ID
+  string             handler_id     = 5; // 处理者 ID
+  bool               approved       = 6; // 是否通过
+  string             reason         = 7; // 处理原因
+  int64              handle_time    = 8; // 处理时间
+}
+
+// Topic: group.stats
+// 群组统计事件
+message GroupStatsEvent {
+  common.EventHeader header                = 1;  // 事件头
+  string             server_id             = 2;  // 服务实例 ID
+  int64              period_start          = 3;  // 统计周期开始
+  int64              period_end            = 4;  // 统计周期结束
+  int64              group_created_count   = 5;  // 新建群数
+  int64              group_dissolved_count = 6;  // 解散群数
+  int64              member_joined_count   = 7;  // 成员加入数
+  int64              member_left_count     = 8;  // 成员退出数
+  int64              member_kicked_count   = 9;  // 成员被踢数
+  int64              application_count     = 10; // 入群申请数
+}

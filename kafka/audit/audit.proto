@@ -1,0 +1,340 @@
+syntax = "proto3";
+package kafka.audit;
+option go_package = "proto_register/kafka/audit";
+
+import "common/common.proto";
+
+// =============================================================================
+// Audit 审计服务 Kafka 事件定义
+//
+// 审计服务负责内容审核、操作审计、风控等
+//
+// 【生产的 Topic】
+//   1. audit.moderation.result   - 内容审核结果
+//   2. audit.content.violation   - 内容违规处理
+//   3. audit.media.violation     - 媒体违规处理
+//   4. audit.user.violation      - 用户违规处理
+//   5. audit.operation.log       - 操作审计日志
+//   6. audit.risk.alert          - 风控告警
+//   7. audit.stats               - 审计统计
+//
+// 【消费的 Topic】
+//   1. msg.moderation.request      - 消息审核请求（来自 message）
+//   2. media.uploaded              - 媒体上传完成（来自 media，触发审核）
+//   3. user.registered             - 用户注册（来自 user，审核昵称/头像）
+//   4. user.profile.updated        - 用户资料更新（来自 user）
+//   5. group.created               - 群创建（来自 group，审核群名/群头像）
+//   6. group.info.updated          - 群信息更新（来自 group）
+//   7. auth.login.fail             - 登录失败（来自 auth，风控分析）
+//   8. apigateway.auth.fail        - 客户端认证失败（来自 apigateway，风控）
+//   9. apigateway.rate.limited    - 限流触发（来自 apigateway，异常检测）
+//   10. apigateway.error           - 网关错误（来自 apigateway，故障分析）
+//   11. apigateway.request.log     - 网关请求日志（来自 apigateway，审计归档）
+//   12. offline.queue.overflow     - 离线队列溢出（来自 offline_queue，风控告警）
+//   13. push.result               - 推送结果（来自 push，投递审计）
+//   14. push.offline.result        - 离线推送结果（来自 push，投递审计）
+//   15. config.changed             - 配置变更（来自 config）
+//   16. auth.login.success         - 登录成功（来自 auth，安全审计）
+//   17. auth.logout                - 用户登出（来自 auth，审计记录）
+//   18. auth.password.changed      - 密码修改（来自 auth，安全审计）
+//   19. user.deactivated           - 用户注销（来自 user，审计归档）
+//   20. msg.stored.single          - 单聊消息存储（来自 message，内容审计抽样）
+//   21. msg.stored.group           - 群聊消息存储（来自 message，内容审计抽样）
+//   22. group.dissolved            - 群解散（来自 group，审计记录）
+//   23. push.stats                 - 推送统计（来自 push，运营统计）
+//   24. msg.forwarded              - 消息转发（来自 message，转发频率风控）
+// =============================================================================
+
+// ==================== 本地业务枚举 ====================
+
+// 审核内容类型枚举
+enum ContentType {
+  CONTENT_TYPE_UNSPECIFIED = 0; // 未指定
+  CONTENT_TYPE_TEXT        = 1; // 文本
+  CONTENT_TYPE_IMAGE       = 2; // 图片
+  CONTENT_TYPE_VIDEO       = 3; // 视频
+  CONTENT_TYPE_VOICE       = 4; // 语音
+  CONTENT_TYPE_NICKNAME    = 5; // 昵称
+  CONTENT_TYPE_GROUP_NAME  = 6; // 群名称
+  CONTENT_TYPE_AVATAR      = 7; // 头像
+}
+
+// 违规类型枚举
+enum ViolationType {
+  VIOLATION_TYPE_UNSPECIFIED = 0;  // 未指定
+  VIOLATION_TYPE_POLITICS    = 1;  // 涉政
+  VIOLATION_TYPE_PORN        = 2;  // 涉黄
+  VIOLATION_TYPE_VIOLENCE    = 3;  // 暴力
+  VIOLATION_TYPE_AD          = 4;  // 广告
+  VIOLATION_TYPE_ABUSE       = 5;  // 辱骂
+  VIOLATION_TYPE_FRAUD       = 6;  // 欺诈
+  VIOLATION_TYPE_SPAM        = 7;  // 垃圾信息
+  VIOLATION_TYPE_OTHER       = 99; // 其他
+}
+
+// 操作类型枚举
+enum OperationType {
+  OPERATION_TYPE_UNSPECIFIED = 0;  // 未指定
+  OPERATION_TYPE_CREATE      = 1;  // 创建
+  OPERATION_TYPE_UPDATE      = 2;  // 更新
+  OPERATION_TYPE_DELETE      = 3;  // 删除
+  OPERATION_TYPE_BAN         = 4;  // 封禁
+  OPERATION_TYPE_UNBAN       = 5;  // 解禁
+  OPERATION_TYPE_MUTE        = 6;  // 禁言
+  OPERATION_TYPE_CONFIG      = 7;  // 配置变更
+  OPERATION_TYPE_LOGIN       = 10; // 登录
+  OPERATION_TYPE_EXPORT      = 11; // 数据导出
+}
+
+// ============== 生产的事件 ==============
+
+// Topic: audit.moderation.result
+// 内容审核结果事件
+message ModerationResultEvent {
+  common.EventHeader      header           = 1;  // 事件头
+  string                  moderation_id    = 2;  // 审核任务 ID
+  string                  content_id       = 3;  // 内容 ID（消息 ID / 媒体 ID 等）
+  ContentType             content_type     = 4;  // 内容类型
+  common.ModerationResult result           = 5;  // 审核结果
+  ViolationType           violation_type   = 6;  // 违规类型（拒绝时有值）
+  double                  confidence       = 7;  // 置信度（0-1）
+  string                  detail           = 8;  // 审核详情
+  string                  replaced_content = 9;  // 替换后的内容（替换模式时有值）
+  string                  operator_id      = 10; // 审核员 ID（人工审核时有值）
+  bool                    is_auto          = 11; // 是否自动审核
+  int64                   audit_time       = 12; // 审核时间
+  int64                   latency_ms       = 13; // 审核延迟（毫秒）
+}
+
+// Topic: audit.content.violation
+// 内容违规处理事件
+message ContentViolationEvent {
+  common.EventHeader header          = 1;  // 事件头
+  string             violation_id    = 2;  // 违规记录 ID
+  string             user_id         = 3;  // 违规用户 ID
+  string             content_id      = 4;  // 违规内容 ID
+  ContentType        content_type    = 5;  // 内容类型
+  ViolationType      violation_type  = 6;  // 违规类型
+  string             action          = 7;  // 处理动作：warn / delete / mute / ban
+  string             detail          = 8;  // 违规详情
+  int32              violation_count = 9;  // 累计违规次数
+  string             operator_id     = 10; // 处理人 ID
+  int64              handle_time     = 11; // 处理时间
+}
+
+// Topic: audit.media.violation
+// 媒体违规处理事件
+message MediaViolationEvent {
+  common.EventHeader header         = 1; // 事件头
+  string             violation_id   = 2; // 违规记录 ID
+  string             media_id       = 3; // 媒体文件 ID
+  string             user_id        = 4; // 上传者 ID
+  ViolationType      violation_type = 5; // 违规类型
+  string             action         = 6; // 处理动作：delete / replace / block
+  string             detail         = 7; // 违规详情
+  string             operator_id    = 8; // 处理人 ID
+  int64              handle_time    = 9; // 处理时间
+}
+
+// Topic: audit.user.violation
+// 用户违规处理事件
+message UserViolationEvent {
+  common.EventHeader header          = 1;  // 事件头
+  string             violation_id    = 2;  // 违规记录 ID
+  string             user_id         = 3;  // 违规用户 ID
+  ViolationType      violation_type  = 4;  // 违规类型
+  string             action          = 5;  // 处理动作：warn / mute / ban
+  string             reason          = 6;  // 处理原因
+  int32              violation_count = 7;  // 累计违规次数
+  int64              ban_duration    = 8;  // 封禁时长（秒，0 表示永久）
+  int64              expire_at       = 9;  // 封禁到期时间
+  string             operator_id     = 10; // 处理人 ID
+  int64              handle_time     = 11; // 处理时间
+}
+
+// Topic: audit.operation.log
+// 操作审计日志事件
+message OperationLogEvent {
+  common.EventHeader  header        = 1;  // 事件头
+  string              log_id        = 2;  // 日志 ID
+  string              operator_id   = 3;  // 操作者 ID
+  string              operator_name = 4;  // 操作者名称
+  OperationType       operation     = 5;  // 操作类型
+  string              target_type   = 6;  // 目标类型：user / group / message / config
+  string              target_id     = 7;  // 目标 ID
+  string              description   = 8;  // 操作描述
+  map<string, string> before_data   = 9;  // 变更前数据
+  map<string, string> after_data    = 10; // 变更后数据
+  string              ip            = 11; // 操作 IP
+  string              user_agent    = 12; // User-Agent
+  int64               operate_time  = 13; // 操作时间
+}
+
+// Topic: audit.risk.alert
+// 风控告警事件
+message RiskAlertEvent {
+  common.EventHeader  header       = 1;  // 事件头
+  string              alert_id     = 2;  // 告警 ID
+  string              user_id      = 3;  // 涉及用户 ID
+  string              risk_type    = 4;  // 风险类型：brute_force / spam / fraud / abnormal
+  string              risk_level   = 5;  // 风险等级：low / medium / high / critical
+  string              description  = 6;  // 告警描述
+  map<string, string> evidence     = 7;  // 证据数据
+  string              action       = 8;  // 建议动作：monitor / restrict / ban
+  bool                auto_handled = 9;  // 是否已自动处理
+  int64               alert_time   = 10; // 告警时间
+}
+
+// Topic: audit.stats
+// 审计统计事件
+message AuditStatsEvent {
+  common.EventHeader header              = 1;  // 事件头
+  string             server_id           = 2;  // 服务实例 ID
+  int64              period_start        = 3;  // 统计周期开始
+  int64              period_end          = 4;  // 统计周期结束
+  int64              moderation_count    = 5;  // 审核总数
+  int64              moderation_pass     = 6;  // 审核通过数
+  int64              moderation_reject   = 7;  // 审核拒绝数
+  int64              violation_count     = 8;  // 违规处理数
+  int64              risk_alert_count    = 9;  // 风控告警数
+  int64              operation_log_count = 10; // 操作日志数
+  int64              avg_audit_latency   = 11; // 平均审核延迟（毫秒）
+}
+
+// ============== 消费的事件 ==============
+
+// Topic: apigateway.auth.fail（来自 apigateway）
+// 客户端认证失败，用于风控分析
+message ApiAuthFailForAudit {
+  common.EventHeader header     = 1; // 事件头
+  string             client_ip  = 2; // 客户端 IP
+  string             path       = 3; // 请求路径
+  string             user_agent = 4; // User-Agent
+  string             error_code = 5; // 错误码
+  string             error_msg  = 6; // 错误信息
+  string             auth_type  = 7; // 认证类型
+  int32              fail_count = 8; // 连续失败次数
+  int64              fail_time  = 9; // 失败时间
+}
+
+// Topic: apigateway.rate.limited（来自 apigateway）
+// 限流触发，用于异常流量检测
+message ApiRateLimitedForAudit {
+  common.EventHeader header        = 1; // 事件头
+  string             user_id       = 2; // 用户 ID
+  string             client_ip     = 3; // 客户端 IP
+  string             path          = 4; // 请求路径
+  string             rule_name     = 5; // 触发的限流规则
+  string             limit_type    = 6; // 限流类型
+  int64              current_count = 7; // 当前计数
+  int64              trigger_time  = 8; // 触发时间
+}
+
+// Topic: apigateway.error（来自 apigateway）
+// 网关错误事件，用于故障分析
+message ApiErrorForAudit {
+  common.EventHeader header      = 1;  // 事件头
+  string             request_id  = 2;  // 请求 ID
+  string             path        = 3;  // 请求路径
+  string             method      = 4;  // HTTP 方法
+  int32              status_code = 5;  // 响应状态码
+  string             error_code  = 6;  // 错误码
+  string             error_msg   = 7;  // 错误信息
+  string             client_ip   = 8;  // 客户端 IP
+  string             user_id     = 9;  // 用户 ID
+  int64              error_time  = 10; // 错误时间
+}
+
+// Topic: apigateway.request.log（来自 apigateway）
+// 网关请求日志，审计归档
+message ApiRequestLogForAudit {
+  common.EventHeader header       = 1;  // 事件头
+  string             request_id   = 2;  // 请求 ID
+  string             user_id      = 3;  // 用户 ID
+  string             path         = 4;  // 请求路径
+  string             method       = 5;  // HTTP 方法
+  int32              status_code  = 6;  // 响应状态码
+  string             client_ip    = 7;  // 客户端 IP
+  string             user_agent   = 8;  // User-Agent
+  int64              latency_ms   = 9;  // 请求延迟（毫秒）
+  int64              request_time = 10; // 请求时间
+}
+
+// Topic: offline.queue.overflow（来自 offline_queue）
+// 离线队列溢出，风控告警
+message OfflineQueueOverflowForAudit {
+  common.EventHeader header        = 1; // 事件头
+  string             user_id       = 2; // 用户 ID
+  int64              queue_size    = 3; // 队列当前大小
+  int64              max_size      = 4; // 队列最大容量
+  int64              dropped_count = 5; // 丢弃消息数
+  int64              overflow_time = 6; // 溢出时间
+}
+
+// Topic: push.result（来自 push）
+// 推送结果事件，审计投递统计（与 push.offline.result 模式一致）
+message PushResultForAudit {
+  common.EventHeader header        = 1; // 事件头
+  string             push_id       = 2; // 推送 ID
+  string             user_id       = 3; // 用户 ID
+  string             msg_id        = 4; // 关联消息 ID
+  bool               success       = 5; // 是否成功
+  string             connection_id = 6; // 连接 ID
+  int64              push_time     = 7; // 推送时间
+  int64              latency_ms    = 8; // 推送延迟（毫秒）
+  string             error_code    = 9; // 错误码（失败时有值）
+  string             error_msg     = 10; // 错误信息（失败时有值）
+}
+
+// Topic: push.offline.result（来自 push）
+// 离线推送结果，审计投递统计
+message PushOfflineResultForAudit {
+  common.EventHeader header       = 1; // 事件头
+  string             push_id      = 2; // 推送 ID
+  string             user_id      = 3; // 用户 ID
+  string             push_channel = 4; // 推送通道
+  bool               success      = 5; // 是否成功
+  string             error_code   = 6; // 错误码
+  string             error_msg    = 7; // 错误信息
+  int64              push_time    = 8; // 推送时间
+}
+
+// Topic: push.stats（来自 push）
+// 推送统计数据，运营统计消费
+message PushStatsForAudit {
+  common.EventHeader header               = 1;  // 事件头
+  string             server_id            = 2;  // 服务实例 ID
+  int64              online_push_count    = 3;  // 在线推送总数
+  int64              offline_push_count   = 4;  // 离线推送总数
+  int64              fail_count           = 5;  // 失败数
+  int64              avg_latency_ms       = 6;  // 平均延迟（毫秒）
+  int64              active_connections   = 7;  // 活跃连接数
+  int64              peak_qps            = 8;  // 峰值 QPS
+  int64              timestamp            = 9;  // 时间戳
+}
+
+// Topic: msg.forwarded（来自 message）
+// 消息转发审计记录，用于合规审计和转发频率风控
+message MsgForwardedForAudit {
+  common.EventHeader header                    = 1; // 事件头
+  string             sender_id                 = 2; // 转发者 ID
+  string             original_msg_id           = 3; // 原始消息 ID
+  string             source_conversation_id    = 4; // 来源会话 ID
+  string             target_conversation_id    = 5; // 目标会话 ID
+  int32              target_conversation_type  = 6; // 目标会话类型
+  string             new_msg_id                = 7; // 新消息 ID
+  int64              forward_time              = 8; // 转发时间
+}
+
+// Topic: group.info.updated（来自 group）
+// 群信息变更审计，触发群名/公告/头像内容审核
+message GroupInfoUpdatedForAudit {
+  common.EventHeader header           = 1;  // 事件头
+  string             group_id         = 2;  // 群 ID
+  string             operator_id      = 3;  // 操作者 ID
+  repeated string    updated_fields   = 4;  // 变更字段列表
+  string             new_group_name   = 5;  // 新群名（群名变更时有值）
+  string             new_announcement = 6;  // 新公告（公告变更时有值）
+  string             new_avatar_url   = 7;  // 新头像 URL（头像变更时有值）
+  int64              update_time      = 8;  // 变更时间
+}

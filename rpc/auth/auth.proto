@@ -1,0 +1,157 @@
+syntax = "proto3";
+
+package auth;
+
+option go_package = "proto_register/rpc/auth";
+
+import "common/common.proto";
+
+// =============================================================================
+// Auth 认证授权服务 — RPC 接口定义
+//
+// 核心职责：
+//   用户登录/登出、Token 管理（签发/刷新/验证）
+//   验证码发送与校验、第三方 OAuth 登录
+//   密码管理（修改密码）
+//
+// 职责边界：
+//   - 不管理用户资料（由 User 服务负责）
+//   - 不管理在线状态（由 Presence 服务负责）
+//   - 不管理登录会话生命周期（由 Session 服务负责）
+//   - 登录成功后调用 Session.CreateLoginSession 创建登录会话
+// =============================================================================
+
+// ==================== 服务特有类型 ====================
+
+// Token 信息
+message TokenInfo {
+  string access_token  = 1; // 访问令牌
+  string refresh_token = 2; // 刷新令牌
+  int64  expires_at    = 3; // 过期时间戳（秒）
+  string token_type    = 4; // 令牌类型，如 Bearer
+}
+
+// ==================== 服务定义 ======================================
+
+service AuthService {
+  // 用户名密码登录
+  rpc Login(LoginRequest) returns (LoginResponse);
+  // 登出
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+  // 刷新访问令牌
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+  // 验证令牌有效性
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+  // 发送短信/邮箱验证码
+  rpc SendVerifyCode(SendVerifyCodeRequest) returns (SendVerifyCodeResponse);
+  // 校验验证码
+  rpc CheckVerifyCode(CheckVerifyCodeRequest) returns (CheckVerifyCodeResponse);
+  // 第三方 OAuth 登录
+  rpc OAuthLogin(OAuthLoginRequest) returns (OAuthLoginResponse);
+  // 修改密码
+  rpc ChangePassword(ChangePasswordRequest) returns (ChangePasswordResponse);
+}
+
+// ==================== 请求/响应 ====================
+
+// --- Login ---
+message LoginRequest {
+  string              username    = 1; // 用户名
+  string              password    = 2; // 密码
+  common.PlatformType platform    = 3; // 平台类型
+  string              device_id   = 4; // 设备唯一标识
+  string              device_name = 5; // 设备名称
+}
+
+message LoginResponse {
+  common.ResponseMeta meta       = 1; // 响应元数据
+  string              user_id    = 2; // 用户 ID
+  TokenInfo           token_info = 3; // Token 信息
+}
+
+// --- Logout ---
+message LogoutRequest {
+  string              user_id   = 1; // 用户 ID
+  string              device_id = 2; // 设备唯一标识
+  common.PlatformType platform  = 3; // 平台类型
+}
+
+message LogoutResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}
+
+// --- RefreshToken ---
+message RefreshTokenRequest {
+  string              refresh_token = 1; // 刷新令牌
+  common.PlatformType platform      = 2; // 平台类型
+  string              device_id     = 3; // 设备唯一标识
+}
+
+message RefreshTokenResponse {
+  common.ResponseMeta meta       = 1; // 响应元数据
+  TokenInfo           token_info = 2; // 新的 Token 信息
+}
+
+// --- VerifyToken ---
+message VerifyTokenRequest {
+  string access_token = 1; // 待验证的访问令牌
+}
+
+message VerifyTokenResponse {
+  common.ResponseMeta meta              = 1; // 响应元数据
+  bool                is_valid          = 2; // 令牌是否有效
+  string              user_id           = 3; // 用户 ID
+  common.PlatformType platform          = 4; // 平台类型
+  int64               remaining_seconds = 5; // 令牌剩余有效期（秒）
+}
+
+// --- SendVerifyCode ---
+message SendVerifyCodeRequest {
+  string target  = 1; // 目标地址（手机号或邮箱）
+  string type    = 2; // 验证码类型：sms / email
+  string purpose = 3; // 用途：login / register / reset_password
+}
+
+message SendVerifyCodeResponse {
+  common.ResponseMeta meta           = 1; // 响应元数据
+  int64               expire_seconds = 2; // 验证码过期时间（秒）
+}
+
+// --- CheckVerifyCode ---
+message CheckVerifyCodeRequest {
+  string target  = 1; // 目标地址
+  string code    = 2; // 验证码
+  string purpose = 3; // 用途
+}
+
+message CheckVerifyCodeResponse {
+  common.ResponseMeta meta     = 1; // 响应元数据
+  bool                is_valid = 2; // 验证码是否正确
+}
+
+// --- OAuthLogin ---
+message OAuthLoginRequest {
+  string              provider    = 1; // OAuth 提供方：wechat / google / apple / github
+  string              auth_code   = 2; // OAuth 授权码
+  common.PlatformType platform    = 3; // 平台类型
+  string              device_id   = 4; // 设备唯一标识
+  string              device_name = 5; // 设备名称
+}
+
+message OAuthLoginResponse {
+  common.ResponseMeta meta        = 1; // 响应元数据
+  string              user_id     = 2; // 用户 ID
+  TokenInfo           token_info  = 3; // Token 信息
+  bool                is_new_user = 4; // 是否为新用户
+}
+
+// --- ChangePassword ---
+message ChangePasswordRequest {
+  string user_id      = 1; // 用户 ID
+  string old_password = 2; // 旧密码
+  string new_password = 3; // 新密码
+}
+
+message ChangePasswordResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}

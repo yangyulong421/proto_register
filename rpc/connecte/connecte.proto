@@ -1,0 +1,207 @@
+syntax = "proto3";
+
+package connecte;
+
+option go_package = "proto_register/rpc/connecte";
+
+import "common/common.proto";
+
+// =============================================================================
+// Connecte 长连接网关服务 — RPC 接口定义
+//
+// 核心职责：
+//   管理客户端 WebSocket / TCP 长连接
+//   维护用户连接路由表（user_id → server_id + connection_id）
+//   下行：通过长连接向客户端推送 sync notify 信号
+//   上行：接收客户端消息并转发至业务服务（通过 Kafka）
+//
+// 在 notify+sync 架构中的角色：
+//   - Push 服务通过 RPC 调用 Connecte 的 SendToConnection 下发 sync notify
+//   - Connecte 仅负责数据透传，不解析消息内容
+//   - 客户端收到 sync notify 后自行调用 Message.PullMessages
+//
+// 多端登录支持：
+//   - 同一用户可在多个平台同时在线（如手机 + PC + Web）
+//   - GetUserConnections 返回用户所有平台的连接信息
+//   - 通过 KickConnection 可踢掉指定连接（如单平台互踢策略）
+//
+// 注意：Connecte 是无状态（业务层面）的网关，不存储任何业务数据
+// =============================================================================
+
+// ==================== 服务定义 ====================
+
+service ConnecteService {
+  // 查询用户在指定平台的连接信息
+  rpc GetUserConnection(GetUserConnectionRequest) returns (GetUserConnectionResponse);
+
+  // 查询用户所有平台的连接信息
+  rpc GetUserConnections(GetUserConnectionsRequest) returns (GetUserConnectionsResponse);
+
+  // 批量查询多个用户的连接信息（用于群推送/状态变更批量扩散）
+  rpc BatchGetUserConnections(BatchGetUserConnectionsRequest) returns (BatchGetUserConnectionsResponse);
+
+  // 踢掉指定连接
+  rpc KickConnection(KickConnectionRequest) returns (KickConnectionResponse);
+
+  // 向指定连接发送数据（sync notify 信号的最终出口）
+  rpc SendToConnection(SendToConnectionRequest) returns (SendToConnectionResponse);
+
+  // 批量向多个连接发送数据
+  rpc BatchSendToConnections(BatchSendToConnectionsRequest) returns (BatchSendToConnectionsResponse);
+
+  // 查询网关节点状态
+  rpc GetGatewayStatus(GetGatewayStatusRequest) returns (GetGatewayStatusResponse);
+
+  // 获取所有网关节点列表
+  rpc GetGatewayNodes(GetGatewayNodesRequest) returns (GetGatewayNodesResponse);
+
+  // 注册连接（网关内部调用，连接建立时上报）
+  rpc RegisterConnection(RegisterConnectionRequest) returns (RegisterConnectionResponse);
+
+  // 注销连接（网关内部调用，连接断开时上报）
+  rpc UnregisterConnection(UnregisterConnectionRequest) returns (UnregisterConnectionResponse);
+}
+
+// ==================== 数据结构 ====================
+
+// 连接信息
+message ConnectionInfo {
+  string              connection_id = 1; // 连接唯一 ID
+  string              user_id       = 2; // 用户 ID
+  common.PlatformType platform      = 3; // 平台类型
+  string              device_id     = 4; // 设备 ID
+  string              server_id     = 5; // 所在网关节点 ID
+  string              server_addr   = 6; // 所在网关节点地址（IP:Port）
+  string              client_ip     = 7; // 客户端 IP 地址
+  int64               connected_at  = 8; // 连接建立时间戳（毫秒）
+  int64               last_active   = 9; // 最后活跃时间戳（毫秒）
+}
+
+// 网关节点信息
+message GatewayNode {
+  string server_id        = 1; // 网关节点 ID
+  string addr             = 2; // 节点地址（IP:Port）
+  int32  connection_count = 3; // 当前连接数
+  int32  max_connections  = 4; // 最大连接数上限
+  double cpu_usage        = 5; // CPU 使用率（0-100）
+  double memory_usage     = 6; // 内存使用率（0-100）
+  int64  started_at       = 7; // 节点启动时间戳（毫秒）
+  string status           = 8; // 节点状态：running / draining / stopped
+}
+
+// ==================== 请求/响应 ====================
+
+// --- GetUserConnection ---
+message GetUserConnectionRequest {
+  string              user_id  = 1; // 用户 ID
+  common.PlatformType platform = 2; // 指定平台
+}
+
+message GetUserConnectionResponse {
+  common.ResponseMeta meta       = 1; // 响应元信息
+  ConnectionInfo      connection = 2; // 连接信息
+  bool                online     = 3; // 是否在线
+}
+
+// --- GetUserConnections ---
+message GetUserConnectionsRequest {
+  string user_id = 1; // 用户 ID
+}
+
+message GetUserConnectionsResponse {
+  common.ResponseMeta    meta        = 1; // 响应元信息
+  repeated ConnectionInfo connections = 2; // 所有平台的连接列表
+}
+
+// --- KickConnection ---
+message KickConnectionRequest {
+  string user_id       = 1; // 用户 ID
+  string connection_id = 2; // 连接 ID
+  string reason        = 3; // 踢出原因
+}
+
+message KickConnectionResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- SendToConnection ---
+message SendToConnectionRequest {
+  string connection_id = 1; // 目标连接 ID
+  string user_id       = 2; // 用户 ID（用于校验）
+  string data_type     = 3; // 数据类型标识（如 sync_notify / kick / system）
+  bytes  data          = 4; // 序列化后的数据载荷
+}
+
+message SendToConnectionResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- BatchSendToConnections ---
+message BatchSendToConnectionsRequest {
+  repeated string connection_ids = 1; // 目标连接 ID 列表
+  string          data_type      = 2; // 数据类型标识
+  bytes           data           = 3; // 序列化后的数据载荷
+}
+
+message BatchSendToConnectionsResponse {
+  common.ResponseMeta meta          = 1; // 响应元信息
+  int32               success_count = 2; // 成功发送数
+  int32               fail_count    = 3; // 失败数
+}
+
+// --- GetGatewayStatus ---
+message GetGatewayStatusRequest {
+  string server_id = 1; // 网关节点 ID
+}
+
+message GetGatewayStatusResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+  GatewayNode         node = 2; // 节点状态信息
+}
+
+// --- GetGatewayNodes ---
+message GetGatewayNodesRequest {}
+
+message GetGatewayNodesResponse {
+  common.ResponseMeta  meta  = 1; // 响应元信息
+  repeated GatewayNode nodes = 2; // 所有网关节点列表
+}
+
+// --- RegisterConnection ---
+message RegisterConnectionRequest {
+  string              user_id       = 1; // 用户 ID
+  string              connection_id = 2; // 连接 ID
+  common.PlatformType platform      = 3; // 平台类型
+  string              device_id     = 4; // 设备 ID
+  string              server_id     = 5; // 网关节点 ID
+  string              client_ip     = 6; // 客户端 IP
+}
+
+message RegisterConnectionResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- UnregisterConnection ---
+message UnregisterConnectionRequest {
+  string user_id       = 1; // 用户 ID
+  string connection_id = 2; // 连接 ID
+}
+
+message UnregisterConnectionResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- BatchGetUserConnections ---
+message BatchGetUserConnectionsRequest {
+  repeated string user_ids = 1; // 用户 ID 列表（单次最多 2000，支持万人群扇出场景）
+}
+
+message UserConnectionsEntry {
+  string                  user_id     = 1; // 用户 ID
+  repeated ConnectionInfo connections = 2; // 该用户的所有连接
+}
+
+message BatchGetUserConnectionsResponse {
+  common.ResponseMeta          meta             = 1; // 响应元信息
+  repeated UserConnectionsEntry user_connections = 2; // 每个用户的连接列表
+}

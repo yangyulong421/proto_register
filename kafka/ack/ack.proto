@@ -1,0 +1,83 @@
+syntax = "proto3";
+package kafka.ack;
+option go_package = "proto_register/kafka/ack";
+
+import "common/common.proto";
+
+// ============================================================
+// ACK 确认服务 Kafka 事件
+// ============================================================
+// 服务职责：
+//   处理消息送达确认与已读确认，维护每条消息的投递状态，
+//   通知发送者对方已读，并汇总群消息已读统计。
+//
+// 生产 Topic：
+//   ack.delivered          — 消息送达确认（客户端确认收到）
+//   ack.read.updated       — 消息已读确认（push/conversation 消费此事件）
+//   ack.read.group         — 群消息已读汇总
+//   ack.stats              — ACK 统计
+//
+// 消费 Topic：
+//   msg.stored.single      — 初始化消息送达追踪（来自 message）
+//   msg.stored.group       — 初始化群消息送达追踪（来自 message）
+//   msg.recalled           — 消息撤回后清理已读回执追踪数据（来自 message）
+//   push.delivered         — 消息投递到客户端确认（来自 push，更新送达状态）
+//   user.deactivated       — 用户注销后清理所有已读/投递记录（来自 user）
+//   config.changed         — 配置变更
+//
+// 【职责边界说明】
+//   - ACK 服务仅处理客户端显式上报的送达确认和已读确认
+//   - Push 服务内部的推送结果由 Push 服务自行维护
+//   - 不依赖 Push 服务的事件来更新投递状态，确保职责单一
+// ============================================================
+
+// -------------------- 事件定义 --------------------
+
+// 消息送达确认事件 —— Topic: ack.delivered
+// 客户端确认收到消息后上报（由 Push 服务在推送成功后调用 ConfirmDelivered 触发）
+message AckDeliveredEvent {
+  common.EventHeader  header          = 1; // 事件头部
+  string              msg_id          = 2; // 消息 ID
+  string              user_id         = 3; // 确认用户 ID
+  string              conversation_id = 4; // 会话 ID
+  int64               ack_time        = 5; // 送达确认时间戳（毫秒）
+  common.PlatformType platform        = 6; // 确认平台
+  string              device_id       = 7; // 确认设备 ID（多端同步）
+}
+
+// 消息已读确认事件 —— Topic: ack.read.updated
+// 用户阅读消息后上报已读位置（Push 用于已读回执推送，Conversation 用于更新未读数）
+message AckReadUpdatedEvent {
+  common.EventHeader header          = 1; // 事件头部
+  string             user_id         = 2; // 用户 ID
+  string             conversation_id = 3; // 会话 ID
+  int64              read_seq        = 4; // 已读到的消息序号
+  repeated string    read_msg_ids    = 5; // 已读消息 ID 列表（可选，精确模式）
+  int64              read_time       = 6; // 已读时间戳（毫秒）
+  string             device_id       = 7; // 设备 ID（多端已读同步）
+}
+
+// 群消息已读汇总事件 —— Topic: ack.read.group
+// 汇总群消息的已读情况
+message AckGroupReadEvent {
+  common.EventHeader header        = 1; // 事件头部
+  string             group_id      = 2; // 群组 ID
+  string             msg_id        = 3; // 消息 ID
+  repeated string    read_user_ids = 4; // 已读用户 ID 列表
+  int32              read_count    = 5; // 已读人数
+  int32              total_count   = 6; // 群成员总数
+}
+
+// ACK 统计事件 —— Topic: ack.stats
+message AckStatsEvent {
+  common.EventHeader header               = 1; // 事件头部
+  int64              total_received       = 2; // 统计周期内送达确认总数
+  int64              total_read           = 3; // 统计周期内已读确认总数
+  int64              total_read_notify    = 4; // 统计周期内已读通知总数
+  int64              total_group_read     = 5; // 统计周期内群已读汇总总数
+  int64              avg_receive_delay_ms = 6; // 平均送达延迟（毫秒）
+  int64              stats_time           = 7; // 统计时间戳（毫秒）
+  int64              period_seconds       = 8; // 统计周期（秒）
+}
+
+

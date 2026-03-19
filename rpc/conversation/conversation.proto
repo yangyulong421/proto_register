@@ -1,0 +1,339 @@
+syntax = "proto3";
+
+package conversation;
+
+option go_package = "proto_register/rpc/conversation";
+
+import "common/common.proto";
+
+// =============================================================================
+// Conversation 会话服务 — RPC 接口定义
+//
+// 核心职责：
+//   1. 通道管理：底层逻辑会话通道的创建和维护（全局唯一）
+//      - 单聊会话：两个用户之间的唯一通道
+//      - 群聊会话：群组对应的唯一通道
+//      - 维护 max_seq，为 notify+sync 提供序号支撑
+//
+//   2. 用户会话视图：每个用户独立的「最近聊天列表」
+//      - 包含：最后消息摘要、未读数、置顶、免打扰、草稿
+//      - 维护 read_seq 和 max_seq 用于未读计算
+//
+// 概念区分：
+//   - ConversationChannel = 底层通道（全局唯一，如 "user_A_user_B" 或 "group_123"）
+//   - UserConversation = 用户维度的视图（每个用户有独立记录，包含 unread、pin 等）
+//   - 一个 Channel 对应多个 UserConversation（单聊 2 个，群聊 N 个）
+//
+// 职责边界：
+//   - 不管理消息内容（由 Message 服务负责）
+//   - 不管理已读回执（由 Ack 服务负责；Ack 处理完已读后通知 Conversation 更新未读数）
+//   - 不管理登录会话（由 Session 服务负责）
+//
+// Kafka 事件命名：conversation.* 前缀
+// =============================================================================
+
+// ==================== 数据结构 ====================
+
+// 会话通道信息（底层通道，全局唯一）
+message ConversationChannel {
+  string                  conversation_id = 1;  // 会话通道唯一 ID
+  common.ConversationType type            = 2;  // 会话类型
+  repeated string         member_ids      = 3;  // 参与者 ID 列表（单聊为两人，群聊为空）
+  string                  group_id        = 4;  // 关联的群 ID（群聊时有值）
+  string                  last_msg_id     = 5;  // 最后一条消息 ID
+  int64                   last_msg_time   = 6;  // 最后一条消息时间戳（毫秒）
+  int64                   max_seq         = 7;  // 当前最大消息序号
+  int64                   created_at      = 8;  // 创建时间戳（毫秒）
+  int64                   updated_at      = 9;  // 更新时间戳（毫秒）
+  map<string, string>     extra           = 10; // 扩展字段
+}
+
+// 用户会话视图（每个用户独立的最近聊天列表条目）
+message UserConversation {
+  string                  id                = 1;  // 记录 ID
+  string                  user_id           = 2;  // 所属用户 ID
+  string                  peer_id           = 3;  // 对方 ID（单聊为 user_id，群聊为 group_id）
+  common.ConversationType conversation_type = 4;  // 会话类型
+  string                  conversation_id   = 5;  // 关联的通道 ID
+  string                  last_msg_id       = 6;  // 最后一条消息 ID
+  string                  last_msg_preview  = 7;  // 最后一条消息预览文本
+  int64                   last_msg_time     = 8;  // 最后一条消息时间戳（毫秒）
+  int64                   unread_count      = 9;  // 未读消息数
+  bool                    is_pinned         = 10; // 是否置顶
+  bool                    is_muted          = 11; // 是否免打扰
+  string                  draft             = 12; // 草稿内容
+  int64                   read_seq          = 13; // 用户在此会话的已读 seq
+  int64                   max_seq           = 14; // 此会话的最大 seq
+  int64                   clear_seq         = 15; // 清空聊天记录时的 seq 位置
+  int64                   clear_time        = 16; // 清空聊天记录的时间戳（毫秒）
+  int64                   created_at        = 17; // 创建时间戳（毫秒）
+  int64                   updated_at        = 18; // 最后更新时间戳（毫秒）
+}
+
+// ==================== 服务定义 ====================
+
+service ConversationService {
+  // ===================== 通道管理 =====================
+
+  // 获取或创建会话通道（幂等操作）
+  rpc GetOrCreateChannel(GetOrCreateChannelRequest) returns (GetOrCreateChannelResponse);
+
+  // 获取会话通道详情
+  rpc GetChannel(GetChannelRequest) returns (GetChannelResponse);
+
+  // 更新通道的最后一条消息信息（Message 服务调用）
+  rpc UpdateChannelLastMsg(UpdateChannelLastMsgRequest) returns (UpdateChannelLastMsgResponse);
+
+  // 删除会话通道（群解散时调用）
+  rpc DeleteChannel(DeleteChannelRequest) returns (DeleteChannelResponse);
+
+  // 获取通道的当前最大 seq（用于 notify+sync 的同步判断）
+  rpc GetChannelMaxSeq(GetChannelMaxSeqRequest) returns (GetChannelMaxSeqResponse);
+
+  // 递增通道序号并返回分配的序号区间（Message 服务发送消息时调用）
+  rpc IncrChannelSeq(IncrChannelSeqRequest) returns (IncrChannelSeqResponse);
+
+  // 设置通道扩展字段
+  rpc SetChannelExtra(SetChannelExtraRequest) returns (SetChannelExtraResponse);
+
+  // ===================== 用户会话视图 =====================
+
+  // 创建用户会话（好友建立/加入群聊时自动创建）
+  rpc CreateUserConversation(CreateUserConversationRequest) returns (CreateUserConversationResponse);
+
+  // 获取单个用户会话详情
+  rpc GetUserConversation(GetUserConversationRequest) returns (GetUserConversationResponse);
+
+  // 获取用户的会话列表（最近聊天列表，游标分页）
+  rpc GetUserConversationList(GetUserConversationListRequest) returns (GetUserConversationListResponse);
+
+  // 更新用户会话属性（置顶、免打扰、草稿）
+  rpc UpdateUserConversation(UpdateUserConversationRequest) returns (UpdateUserConversationResponse);
+
+  // MED-08: 独立的置顶/免打扰接口（语义清晰，便于单独限流和监控）
+  // 置顶会话
+  rpc PinConversation(PinConversationRequest) returns (PinConversationResponse);
+  // 免打扰
+  rpc MuteConversation(MuteConversationRequest) returns (MuteConversationResponse);
+
+  // 删除用户会话（从用户的列表中移除）
+  rpc DeleteUserConversation(DeleteUserConversationRequest) returns (DeleteUserConversationResponse);
+
+  // 清除用户会话未读数
+  rpc ClearUnread(ClearUnreadRequest) returns (ClearUnreadResponse);
+
+  // 设置已读位置（内部调用：Ack 服务处理已读后更新）
+  rpc SetReadSeq(SetReadSeqRequest) returns (SetReadSeqResponse);
+
+  // 设置清空位置（内部调用：Message 服务清空会话聊天记录时调用）
+  rpc SetClearSeq(SetClearSeqRequest) returns (SetClearSeqResponse);
+
+  // 获取用户所有会话的总未读数
+  rpc GetTotalUnread(GetTotalUnreadRequest) returns (GetTotalUnreadResponse);
+}
+
+// ==================== 通道管理 — 请求/响应 ====================
+
+// --- GetOrCreateChannel ---
+message GetOrCreateChannelRequest {
+  common.ConversationType type       = 1; // 会话类型
+  repeated string         member_ids = 2; // 参与者 ID（单聊传两人）
+  string                  group_id   = 3; // 群 ID（群聊时传入）
+}
+
+message GetOrCreateChannelResponse {
+  common.ResponseMeta  meta    = 1; // 响应元信息
+  ConversationChannel  channel = 2; // 通道信息
+  bool                 created = 3; // 是否为新创建
+}
+
+// --- GetChannel ---
+message GetChannelRequest {
+  string conversation_id = 1; // 通道 ID
+}
+
+message GetChannelResponse {
+  common.ResponseMeta meta    = 1; // 响应元信息
+  ConversationChannel channel = 2; // 通道信息
+}
+
+// --- UpdateChannelLastMsg ---
+message UpdateChannelLastMsgRequest {
+  string conversation_id = 1; // 通道 ID
+  string last_msg_id     = 2; // 最后一条消息 ID
+  int64  last_msg_time   = 3; // 最后一条消息时间戳
+}
+
+message UpdateChannelLastMsgResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- DeleteChannel ---
+message DeleteChannelRequest {
+  string conversation_id = 1; // 通道 ID
+}
+
+message DeleteChannelResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetChannelMaxSeq ---
+message GetChannelMaxSeqRequest {
+  string conversation_id = 1; // 通道 ID
+}
+
+message GetChannelMaxSeqResponse {
+  common.ResponseMeta meta    = 1; // 响应元信息
+  int64               max_seq = 2; // 当前最大 seq
+}
+
+// --- IncrChannelSeq ---
+message IncrChannelSeqRequest {
+  string conversation_id = 1; // 通道 ID
+  int32  count           = 2; // 需要分配的序号数量（通常为 1）
+}
+
+message IncrChannelSeqResponse {
+  common.ResponseMeta meta      = 1; // 响应元信息
+  int64               start_seq = 2; // 分配的起始 seq（含）
+  int64               end_seq   = 3; // 分配的结束 seq（含）
+}
+
+// --- SetChannelExtra ---
+message SetChannelExtraRequest {
+  string              conversation_id = 1; // 通道 ID
+  map<string, string> extra           = 2; // 扩展字段（合并更新）
+}
+
+message SetChannelExtraResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// ==================== 用户会话视图 — 请求/响应 ====================
+
+// --- CreateUserConversation ---
+message CreateUserConversationRequest {
+  string                  user_id           = 1; // 用户 ID
+  string                  peer_id           = 2; // 对方 ID
+  common.ConversationType conversation_type = 3; // 会话类型
+}
+
+message CreateUserConversationResponse {
+  common.ResponseMeta meta         = 1; // 响应元信息
+  UserConversation    conversation = 2; // 创建的用户会话
+}
+
+// --- GetUserConversation ---
+message GetUserConversationRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 会话 ID
+}
+
+message GetUserConversationResponse {
+  common.ResponseMeta meta         = 1; // 响应元信息
+  UserConversation    conversation = 2; // 用户会话详情
+}
+
+// --- GetUserConversationList（游标分页，解决实时更新场景下数据重复/遗漏问题）---
+message GetUserConversationListRequest {
+  string user_id      = 1; // 用户 ID
+  int64  cursor_time  = 2; // 游标：上一页最后一条的 last_msg_time（首次传 0）
+  string cursor_id    = 3; // 游标：上一页最后一条的 ID（首次传空，同一时间戳去重）
+  int32  limit        = 4; // 每页条数（默认 20，最大 100）
+  bool   pinned_first = 5; // 是否置顶会话优先排序
+}
+
+message GetUserConversationListResponse {
+  common.ResponseMeta      meta          = 1; // 响应元信息
+  repeated UserConversation conversations = 2; // 会话列表
+  bool                     has_more      = 3; // 是否还有更多数据
+}
+
+// --- UpdateUserConversation ---
+message UpdateUserConversationRequest {
+  string          user_id         = 1; // 用户 ID
+  string          conversation_id = 2; // 会话 ID
+  optional bool   is_pinned       = 3; // 置顶状态（不传则不修改）
+  optional bool   is_muted        = 4; // 免打扰状态（不传则不修改）
+  optional string draft           = 5; // 草稿内容（不传则不修改）
+}
+
+message UpdateUserConversationResponse {
+  common.ResponseMeta meta         = 1; // 响应元信息
+  UserConversation    conversation = 2; // 更新后的会话
+}
+
+// --- DeleteUserConversation ---
+message DeleteUserConversationRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 会话 ID
+  bool   clear_msg       = 3; // 是否同时清除本地消息记录
+}
+
+message DeleteUserConversationResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- ClearUnread ---
+message ClearUnreadRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 会话 ID
+}
+
+message ClearUnreadResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- SetReadSeq ---
+message SetReadSeqRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 会话 ID
+  int64  read_seq        = 3; // 已读到的 seq 位置
+}
+
+message SetReadSeqResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- SetClearSeq ---
+message SetClearSeqRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 会话 ID
+  int64  clear_seq       = 3; // 清空到的 seq 位置
+}
+
+message SetClearSeqResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- GetTotalUnread ---
+message GetTotalUnreadRequest {
+  string user_id = 1; // 用户 ID
+}
+
+message GetTotalUnreadResponse {
+  common.ResponseMeta meta         = 1; // 响应元信息
+  int64               total_unread = 2; // 所有会话未读消息总数
+}
+
+// --- PinConversation (MED-08) ---
+message PinConversationRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 会话 ID
+  bool   is_pinned       = 3; // true=置顶, false=取消置顶
+}
+
+message PinConversationResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- MuteConversation (MED-08) ---
+message MuteConversationRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 会话 ID
+  bool   is_muted        = 3; // true=开启免打扰, false=关闭免打扰
+}
+
+message MuteConversationResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}

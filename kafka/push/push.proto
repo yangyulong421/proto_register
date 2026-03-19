@@ -1,0 +1,424 @@
+syntax = "proto3";
+package kafka.push;
+option go_package = "proto_register/kafka/push";
+
+import "common/common.proto";
+
+// =============================================================================
+// Push 推送服务 Kafka 事件定义
+//
+// Push 服务负责将 sync notify 信号送达用户（在线推送或离线推送）
+// 是 notify+sync 架构的关键中间层
+//
+// 【notify+sync 模式下的 Push 流程】
+//   1. 消费 msg.stored → 查询用户连接状态
+//   2. 在线：通过 Connecte 发送轻量 sync notify（不含消息内容）
+//   3. 离线：触发 APNs/FCM 推送 + 入队 OfflineQueue
+//   4. Push 服务 **不** 传递完整消息体
+//
+// 【生产的 Topic】
+//   1. push.result               - 在线推送结果（成功/失败，通过 success 字段区分）
+//   2. push.offline.trigger      - 触发离线推送（APNs/FCM）
+//   3. push.offline.result       - 离线推送结果
+//   4. push.delivered            - 消息已投递到客户端
+//   5. push.offline.enqueue      - 离线同步信号入队（通知 OfflineQueue）
+//   6. push.stats                - 推送统计
+//
+// 【消费的 Topic】
+//   1. msg.stored.single         - 单聊消息存储完成（来自 message）
+//   2. msg.stored.group          - 群聊消息存储完成（来自 message）
+//   3. msg.recalled              - 消息撤回（来自 message）
+//   4. msg.forwarded             - 消息转发（来自 message）
+//   5. msg.deleted               - 消息删除（来自 message，多端同步）
+//   6. ack.read.updated          - 已读回执推送（来自 ack）
+//   7. ack.read.group            - 群消息已读汇总（来自 ack）
+//   8. ack.delivered             - 消息送达确认（来自 ack）
+//   9. notification.created      - 通知创建（来自 notification，直接投递）
+//   10. presence.status.notify   - 状态变更通知（来自 presence，含订阅者列表）
+//   11. presence.typing          - 正在输入状态（来自 presence）
+//   12. relation.friend.request  - 好友申请（来自 relation）
+//   13. relation.friend.accepted - 好友通过（来自 relation）
+//   14. relation.blocked         - 拉黑（来自 relation，缓存更新）
+//   15. relation.remark.updated  - 备注变更（来自 relation，多端同步）
+//   16. group.member.joined      - 群成员加入（来自 group）
+//   17. group.member.kicked      - 群成员被踢（来自 group）
+//   18. group.member.left        - 群成员退出（来自 group）
+//   19. group.member.role.changed - 群成员角色变更（来自 group）
+//   20. group.dissolved          - 群解散（来自 group）
+//   21. group.info.updated       - 群信息变更（来自 group）
+//   22. group.mute.changed       - 群禁言变更（来自 group）
+//   23. group.application        - 入群申请（来自 group）
+//   24. group.application.handled - 入群申请处理（来自 group）
+//   25. push.offline.trigger     - 离线推送任务（自产自消，内部 Worker）
+//   26. conversation.updated     - 会话更新（来自 conversation）
+//   27. conversation.created     - 会话创建（来自 conversation）
+//   28. conversation.deleted     - 会话删除（来自 conversation）
+//   29. conversation.top.changed - 置顶变更（来自 conversation）
+//   30. conversation.mute.changed- 免打扰变更（来自 conversation）
+//   31. conversation.unread.reset- 未读数重置（来自 conversation）
+//   32. conversation.unread.changed - 未读数增量变更（来自 conversation，badge 更新）
+//   33. notification.read        - 通知已读（来自 notification，badge 更新）
+//   34. notification.read.all    - 通知全部已读（来自 notification）
+//   35. notification.deleted     - 通知删除（来自 notification）
+//   36. system.broadcast         - 系统广播（来自 config）
+//   37. user.settings.updated    - 用户设置变更（来自 user，本地缓存更新）
+//   38. user.profile.updated     - 用户资料变更（来自 user，本地缓存更新）
+//   39. config.changed           - 配置变更（来自 config）
+//   40. offline.dequeue.batch    - 离线信号批量出队（来自 offline_queue，用户上线后推送）
+//
+//   总计：40 个消费 Topic
+// =============================================================================
+
+// ============== 消费的事件 ==============
+
+// Topic: msg.stored.single | msg.stored.group（来自 message）
+// Push 服务消费此事件，决定在线推送还是离线推送
+// 注意：此事件仅包含摘要信息，不含完整消息体
+message MsgStoredForPush {
+  common.EventHeader      header             = 1;  // 事件头
+  string                  msg_id             = 2;  // 消息 ID
+  string                  conversation_id    = 3;  // 会话 ID
+  common.ConversationType conversation_type  = 4;  // 会话类型
+  string                  sender_id          = 5;  // 发送者 ID
+  string                  receiver_id        = 6;  // 接收者 ID
+  common.MessageType      msg_type           = 7;  // 消息类型
+  string                  content_preview    = 8;  // 内容预览（用于离线推送通知展示）
+  int64                   seq                = 9;  // 消息 seq
+  int64                   send_time          = 10; // 发送时间
+  string                  sender_nickname    = 11; // 发送者昵称
+  string                  sender_avatar      = 12; // 发送者头像
+  string                  group_id           = 13; // 群 ID（群聊时有值）
+  string                  group_name         = 14; // 群名称（群聊时有值）
+  int32                   group_member_count = 15; // 群成员数
+  bool                    has_at             = 16; // 是否含有 @
+  repeated string         at_user_ids        = 17; // @的用户列表
+  repeated string         muted_user_ids     = 18; // 已设免打扰的用户列表
+  bool                    has_at_all         = 19; // 是否 @全体成员
+}
+
+// Topic: msg.recalled（来自 message）
+message MsgRecalledForPush {
+  common.EventHeader      header            = 1; // 事件头
+  string                  msg_id            = 2; // 被撤回消息 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  string                  sender_id         = 5; // 撤回者 ID
+  string                  sender_nickname   = 6; // 撤回者昵称
+  int64                   original_seq      = 7; // 被撤回消息 seq
+  int64                   recall_time       = 8; // 撤回时间
+  repeated string         target_user_ids   = 9; // 需要通知的用户列表
+}
+
+// Topic: msg.deleted（来自 message，多端同步删除）
+message MsgDeletedForPush {
+  common.EventHeader header          = 1; // 事件头
+  string             user_id         = 2; // 删除操作者 ID
+  repeated string    msg_ids         = 3; // 被删除的消息 ID 列表
+  string             conversation_id = 4; // 会话 ID
+  int64              delete_time     = 5; // 删除时间戳
+}
+
+// Topic: presence.typing（来自 presence，正在输入状态推送）
+message TypingIndicatorForPush {
+  common.EventHeader header          = 1; // 事件头
+  string             user_id         = 2; // 正在输入的用户 ID
+  string             target_id       = 3; // 推送目标 ID
+  string             conversation_id = 4; // 会话 ID
+  string             action          = 5; // 输入状态：typing / recording_voice / uploading_file
+  string             user_nickname   = 6; // 用户昵称
+}
+
+// Topic: ack.read.updated（来自 ack）
+// 已读回执推送给消息发送者
+message ReadReceiptForPush {
+  common.EventHeader      header            = 1; // 事件头
+  string                  target_user_id    = 2; // 推送目标（消息发送者）
+  string                  reader_id         = 3; // 已读者 ID
+  string                  conversation_id   = 4; // 会话 ID
+  common.ConversationType conversation_type = 5; // 会话类型
+  int64                   read_seq          = 6; // 已读到的 seq
+  string                  last_read_msg_id  = 7; // 最后已读消息 ID
+  int64                   read_time         = 8; // 已读时间
+}
+
+// Topic: presence.status.notify（来自 presence）
+// 用户在线状态变更通知，带有预解析的订阅者列表，直接推送
+message PresenceStatusNotifyForPush {
+  common.EventHeader  header         = 1; // 事件头
+  string              user_id        = 2; // 状态变更的用户 ID
+  common.OnlineStatus new_status     = 3; // 新状态
+  string              custom_status  = 4; // 自定义状态文本
+  repeated string     subscriber_ids = 5; // 订阅者 ID 列表（Presence 服务预解析）
+  int64               notify_time    = 6; // 通知时间
+}
+
+// Topic: system.broadcast（来自 config）
+message SystemBroadcastForPush {
+  common.EventHeader           header           = 1; // 事件头
+  string                       broadcast_id     = 2; // 广播 ID
+  string                       title            = 3; // 标题
+  string                       content          = 4; // 内容
+  string                       data_type        = 5; // 数据类型
+  bytes                        payload          = 6; // 载荷
+  repeated common.PlatformType target_platforms = 7; // 目标平台
+  int64                        expire_time      = 8; // 过期时间
+}
+
+// ============== 生产的事件 ==============
+
+// Topic: push.result
+// 在线推送结果（合并 success 和 fail，与 push.offline.result 模式一致）
+// 设计说明：与 push.offline.result 统一模式（bool success），减少 Topic 数量，
+//          简化消费端处理，后续可同时跟踪成功和失败推送。
+message PushResultEvent {
+  common.EventHeader  header        = 1;  // 事件头
+  string              push_id       = 2;  // 推送 ID
+  string              user_id       = 3;  // 用户 ID
+  string              msg_id        = 4;  // 关联消息 ID
+  bool                success       = 5;  // 是否成功
+  string              connection_id = 6;  // 连接 ID（成功时有值）
+  common.PlatformType platform      = 7;  // 平台
+  int64               push_time     = 8;  // 推送时间
+  int64               latency_ms    = 9;  // 推送延迟（毫秒）
+  string              error_code    = 10; // 错误码（失败时有值）
+  string              error_msg     = 11; // 错误信息（失败时有值）
+  string              reason        = 12; // 失败原因（失败时有值）
+  int32               retry_count   = 13; // 已重试次数（失败时有值）
+  bool                need_retry    = 14; // 是否需要重试（失败时有值）
+}
+
+// Topic: push.offline.trigger
+// 触发离线推送（发往 APNs/FCM/厂商通道）
+message PushOfflineTriggerEvent {
+  common.EventHeader      header          = 1;  // 事件头
+  string                  user_id         = 2;  // 用户 ID
+  string                  push_channel    = 3;  // 推送通道：apns / fcm / huawei 等
+  string                  push_token      = 4;  // 推送 Token
+  string                  device_id       = 5;  // 设备 ID
+  common.PlatformType     platform        = 6;  // 平台
+  string                  title           = 7;  // 推送标题
+  string                  content         = 8;  // 推送内容摘要
+  string                  badge           = 9;  // 角标
+  string                  sound           = 10; // 提示音
+  string                  image_url       = 11; // 推送图片
+  map<string, string>     data            = 12; // 自定义数据
+  int64                   expire_time     = 13; // 过期时间
+  string                  msg_id          = 14; // 关联消息 ID
+  string                  conversation_id = 15; // 会话 ID
+  string                  sender_id       = 16; // 发送者 ID
+}
+
+// Topic: push.offline.result
+// 离线推送结果
+message PushOfflineResultEvent {
+  common.EventHeader header         = 1; // 事件头
+  string             push_id        = 2; // 推送 ID
+  string             user_id        = 3; // 用户 ID
+  string             push_channel   = 4; // 推送通道
+  bool               success        = 5; // 是否成功
+  string             error_code     = 6; // 错误码
+  string             error_msg      = 7; // 错误信息
+  string             channel_msg_id = 8; // 通道返回的消息 ID
+  int64              push_time      = 9; // 推送时间
+}
+
+// Topic: push.delivered
+// 消息投递确认（客户端确认已接收 sync notify）
+message PushDeliveredEvent {
+  common.EventHeader  header       = 1; // 事件头
+  string              msg_id       = 2; // 消息 ID
+  string              user_id      = 3; // 用户 ID
+  common.PlatformType platform     = 4; // 平台
+  string              device_id    = 5; // 设备 ID
+  int64               deliver_time = 6; // 投递时间
+}
+
+// Topic: push.offline.enqueue
+// 通知 OfflineQueue 入队同步信号（轻量信号，非完整消息）
+// 注意：不包含 push 通道信息（need_push / push_channel / device_token），
+//       离线推送由 Push 服务自行通过 push.offline.trigger 处理
+message PushOfflineEnqueueEvent {
+  common.EventHeader      header            = 1;  // 事件头
+  string                  user_id           = 2;  // 离线用户 ID
+  string                  conversation_id   = 3;  // 会话 ID
+  common.ConversationType conversation_type = 4;  // 会话类型
+  int64                   max_seq           = 5;  // 最新消息 seq
+  string                  sender_id         = 6;  // 发送者 ID
+  string                  sender_name       = 7;  // 发送者昵称
+  common.MessageType      msg_type          = 8;  // 消息类型
+  string                  content_preview   = 9;  // 内容预览
+  int32                   priority          = 10; // 优先级
+}
+
+// Topic: push.stats
+// 推送统计
+message PushStatsEvent {
+  common.EventHeader header               = 1;  // 事件头
+  string             server_id            = 2;  // 服务实例 ID
+  int64              period_start         = 3;  // 统计周期开始
+  int64              period_end           = 4;  // 统计周期结束
+  int64              online_push_count    = 5;  // 在线推送总数
+  int64              online_push_success  = 6;  // 在线推送成功数
+  int64              online_push_fail     = 7;  // 在线推送失败数
+  int64              offline_push_count   = 8;  // 离线推送总数
+  int64              offline_push_success = 9;  // 离线推送成功数
+  int64              offline_push_fail    = 10; // 离线推送失败数
+  int64              avg_latency_ms       = 11; // 平均推送延迟（毫秒）
+  int64              p99_latency_ms       = 12; // P99 推送延迟（毫秒）
+}
+
+// ============== 新增消费事件 ==============
+
+// Topic: ack.read.group（来自 ack）
+message AckGroupReadForPush {
+  common.EventHeader header        = 1; // 事件头
+  string             group_id      = 2; // 群 ID
+  string             msg_id        = 3; // 消息 ID
+  repeated string    read_user_ids = 4; // 已读用户 ID 列表
+  int32              read_count    = 5; // 已读人数
+  int32              total_count   = 6; // 总人数
+  string             sender_id     = 7; // 消息发送者 ID（推送目标）
+}
+
+// Topic: msg.forwarded（来自 message）
+message MsgForwardedForPush {
+  common.EventHeader               header          = 1; // 事件头
+  string                           sender_id       = 2; // 转发者 ID
+  string                           original_msg_id = 3; // 原始消息 ID
+  repeated ForwardTargetForPush    targets         = 4; // 转发目标列表
+  int64                            forward_time    = 5; // 转发时间
+}
+
+// 转发目标
+message ForwardTargetForPush {
+  string                  target_id         = 1; // 目标 ID
+  common.ConversationType conversation_type = 2; // 目标会话类型
+  string                  new_msg_id        = 3; // 新生成的消息 ID
+  string                  conversation_id   = 4; // 目标会话 ID
+  int64                   seq               = 5; // 新消息 seq
+}
+
+// Topic: conversation.updated（来自 conversation）
+message ConversationUpdatedForPush {
+  common.EventHeader      header            = 1; // 事件头
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  string                  last_msg_preview  = 5; // 最后一条消息预览
+  int64                   last_msg_seq      = 6; // 最后一条消息 seq
+  int32                   unread_count      = 7; // 未读数
+  int64                   update_time       = 8; // 更新时间
+}
+
+// Topic: conversation.created（来自 conversation）
+message ConversationCreatedForPush {
+  common.EventHeader      header            = 1; // 事件头
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  string                  peer_id           = 5; // 对端 ID
+  string                  peer_name         = 6; // 对端名称
+  string                  peer_avatar       = 7; // 对端头像
+  int64                   create_time       = 8; // 创建时间
+}
+
+// Topic: conversation.deleted（来自 conversation）
+message ConversationDeletedForPush {
+  common.EventHeader      header            = 1; // 事件头
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  string                  reason            = 5; // 删除原因
+  int64                   delete_time       = 6; // 删除时间
+}
+
+// Topic: conversation.top.changed（来自 conversation）
+message ConversationTopChangedForPush {
+  common.EventHeader      header            = 1; // 事件头
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  bool                    is_top            = 5; // 是否置顶
+  int64                   change_time       = 6; // 变更时间
+}
+
+// Topic: conversation.mute.changed（来自 conversation）
+message ConversationMuteChangedForPush {
+  common.EventHeader      header            = 1; // 事件头
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  bool                    is_muted          = 5; // 是否免打扰
+  int64                   change_time       = 6; // 变更时间
+}
+
+// Topic: conversation.unread.reset（来自 conversation）
+message ConversationUnreadResetForPush {
+  common.EventHeader      header            = 1; // 事件头
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  int32                   new_unread_count  = 5; // 重置后未读数
+  int64                   reset_time        = 6; // 重置时间
+}
+
+// Topic: notification.created（来自 notification）
+message NotificationCreatedForPush {
+  common.EventHeader      header          = 1;  // 事件头
+  string                  notification_id = 2;  // 通知 ID
+  string                  target_user_id  = 3;  // 通知接收者 ID
+  common.NotificationType type            = 4;  // 通知类型
+  string                  title           = 5;  // 通知标题
+  string                  content         = 6;  // 通知内容
+  string                  sender_id       = 7;  // 触发者 ID
+  string                  sender_nickname = 8;  // 触发者昵称
+  string                  sender_avatar   = 9;  // 触发者头像
+  map<string, string>     extra           = 10; // 扩展数据
+  int64                   create_time     = 11; // 创建时间
+}
+
+// Topic: notification.read（来自 notification）
+message NotificationReadForPush {
+  common.EventHeader header           = 1; // 事件头
+  string             user_id          = 2; // 用户 ID
+  repeated string    notification_ids = 3; // 已读通知 ID 列表
+  int64              read_time        = 4; // 已读时间
+}
+
+// Topic: notification.read.all（来自 notification）
+message NotificationReadAllForPush {
+  common.EventHeader header    = 1; // 事件头
+  string             user_id   = 2; // 用户 ID
+  int32              count     = 3; // 标记已读数量
+  int64              read_time = 4; // 已读时间
+}
+
+// Topic: notification.deleted（来自 notification）
+message NotificationDeletedForPush {
+  common.EventHeader header           = 1; // 事件头
+  string             user_id          = 2; // 用户 ID
+  repeated string    notification_ids = 3; // 删除的通知 ID 列表
+  int64              delete_time      = 4; // 删除时间
+}
+
+// Topic: offline.dequeue.batch（来自 offline_queue）
+// 用户上线后离线队列批量出队，Push 将同步信号推送给用户
+message OfflineDequeueBatchForPush {
+  common.EventHeader                header       = 1; // 事件头
+  string                            user_id      = 2; // 用户 ID
+  repeated OfflineSyncSignalForPush signals      = 3; // 同步信号列表
+  int32                             total_count  = 4; // 信号总数
+  int64                             dequeue_time = 5; // 出队时间
+}
+
+// 离线同步信号条目（用于 Push 推送）
+message OfflineSyncSignalForPush {
+  string                  conversation_id   = 1; // 会话 ID
+  common.ConversationType conversation_type = 2; // 会话类型
+  int64                   max_seq           = 3; // 最新 seq
+  string                  sender_id         = 4; // 发送者 ID
+  string                  sender_name       = 5; // 发送者昵称
+  common.MessageType      msg_type          = 6; // 消息类型
+  string                  content_preview   = 7; // 内容预览
+  int32                   priority          = 8; // 优先级
+}

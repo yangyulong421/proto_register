@@ -1,0 +1,261 @@
+syntax = "proto3";
+
+package common;
+
+option go_package = "proto_register/common";
+
+// =============================================================================
+// 公共类型定义 — 所有 RPC 和 Kafka 服务共享
+//
+// 所有 proto 文件通过 import "common/common.proto" 引用此文件，
+// 确保枚举值、通用结构在全系统范围内语义一致、编号一致。
+//
+// ⚠️ 修改本文件时需评估对所有下游服务的影响。
+// =============================================================================
+
+// ==================== 通用响应与分页 ====================
+
+// 通用响应元信息
+message ResponseMeta {
+  int32  code        = 1; // 业务状态码，0 表示成功
+  string message     = 2; // 状态描述信息
+  int64  server_time = 3; // 服务端时间戳（毫秒）
+  string trace_id    = 4; // 请求追踪 ID
+}
+
+// 分页请求参数
+message Pagination {
+  int32 page      = 1; // 页码，从 1 开始
+  int32 page_size = 2; // 每页条数
+}
+
+// 分页结果信息
+message PaginationResult {
+  int32 page        = 1; // 当前页码
+  int32 page_size   = 2; // 每页条数
+  int64 total       = 3; // 总记录数
+  int32 total_pages = 4; // 总页数
+}
+
+// 时间范围
+message TimeRange {
+  int64 start_time = 1; // 起始时间戳（毫秒）
+  int64 end_time   = 2; // 结束时间戳（毫秒）
+}
+
+// Kafka 事件头信息（所有 Kafka 事件必须携带）
+message EventHeader {
+  string              event_id  = 1; // 事件唯一 ID
+  string              trace_id  = 2; // 分布式追踪 ID
+  string              span_id   = 3; // 追踪 span ID
+  string              source    = 4; // 事件来源服务名
+  string              source_id = 5; // 来源服务实例 ID
+  int64               timestamp = 6; // 事件生成时间戳（毫秒）
+  int32               version   = 7; // 事件协议版本号
+  map<string, string> metadata  = 8; // 扩展元数据
+}
+
+// ==================== 平台与设备 ====================
+
+// 客户端平台类型枚举（全局统一编号，所有服务必须使用此版本）
+enum PlatformType {
+  PLATFORM_TYPE_UNSPECIFIED  = 0; // 未指定
+  PLATFORM_TYPE_IOS          = 1; // iOS 手机
+  PLATFORM_TYPE_ANDROID      = 2; // Android 手机
+  PLATFORM_TYPE_WINDOWS      = 3; // Windows 桌面端
+  PLATFORM_TYPE_MACOS        = 4; // macOS 桌面端
+  PLATFORM_TYPE_LINUX        = 5; // Linux 桌面端
+  PLATFORM_TYPE_WEB          = 6; // Web 浏览器
+  PLATFORM_TYPE_IPAD         = 7; // iPad 平板端
+  PLATFORM_TYPE_ANDROID_PAD  = 8; // Android 平板端
+  PLATFORM_TYPE_MINI_PROGRAM = 9; // 小程序
+}
+
+// ==================== 会话类型 ====================
+
+// 会话类型枚举
+enum ConversationType {
+  CONVERSATION_TYPE_UNSPECIFIED = 0; // 未指定
+  CONVERSATION_TYPE_SINGLE      = 1; // 单聊
+  CONVERSATION_TYPE_GROUP       = 2; // 群聊
+  CONVERSATION_TYPE_SYSTEM      = 3; // 系统会话
+  CONVERSATION_TYPE_CHANNEL     = 4; // 频道
+}
+
+// ==================== 消息类型与状态 ====================
+
+// 消息类型枚举
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;  // 未指定
+  MESSAGE_TYPE_TEXT        = 1;  // 文本消息
+  MESSAGE_TYPE_IMAGE       = 2;  // 图片消息
+  MESSAGE_TYPE_VOICE       = 3;  // 语音消息
+  MESSAGE_TYPE_VIDEO       = 4;  // 视频消息
+  MESSAGE_TYPE_FILE        = 5;  // 文件消息
+  MESSAGE_TYPE_LOCATION    = 6;  // 位置消息
+  MESSAGE_TYPE_SYSTEM      = 7;  // 系统提示消息
+  MESSAGE_TYPE_RECALL      = 8;  // 撤回提示消息
+  MESSAGE_TYPE_CUSTOM      = 9;  // 自定义消息
+  MESSAGE_TYPE_MERGE       = 10; // 合并转发消息
+  MESSAGE_TYPE_CARD        = 11; // 名片消息
+}
+
+// 消息状态枚举
+enum MessageStatus {
+  MESSAGE_STATUS_UNSPECIFIED = 0; // 未指定
+  MESSAGE_STATUS_SENDING     = 1; // 发送中
+  MESSAGE_STATUS_SENT        = 2; // 已发送（服务端已存储）
+  MESSAGE_STATUS_DELIVERED   = 3; // 已投递（客户端已拉取）
+  MESSAGE_STATUS_READ        = 4; // 已读
+  MESSAGE_STATUS_RECALLED    = 5; // 已撤回
+  MESSAGE_STATUS_FAILED      = 6; // 发送失败
+}
+
+// ==================== 在线状态 ====================
+
+// 在线状态枚举
+enum OnlineStatus {
+  ONLINE_STATUS_UNSPECIFIED = 0; // 未指定
+  ONLINE_STATUS_ONLINE      = 1; // 在线
+  ONLINE_STATUS_OFFLINE     = 2; // 离线
+  ONLINE_STATUS_BUSY        = 3; // 忙碌
+  ONLINE_STATUS_AWAY        = 4; // 离开
+  ONLINE_STATUS_INVISIBLE   = 5; // 隐身
+}
+
+// ==================== 媒体处理 ====================
+
+// 媒体处理状态枚举
+enum MediaProcessStatus {
+  MEDIA_PROCESS_STATUS_UNSPECIFIED = 0; // 未指定
+  MEDIA_PROCESS_STATUS_PENDING     = 1; // 待处理
+  MEDIA_PROCESS_STATUS_PROCESSING  = 2; // 处理中
+  MEDIA_PROCESS_STATUS_COMPLETED   = 3; // 已完成
+  MEDIA_PROCESS_STATUS_FAILED      = 4; // 处理失败
+}
+
+// 上传类型枚举
+enum UploadType {
+  UPLOAD_TYPE_UNSPECIFIED  = 0; // 未指定
+  UPLOAD_TYPE_AVATAR       = 1; // 用户头像
+  UPLOAD_TYPE_IMAGE        = 2; // 图片
+  UPLOAD_TYPE_VOICE        = 3; // 语音
+  UPLOAD_TYPE_VIDEO        = 4; // 视频
+  UPLOAD_TYPE_FILE         = 5; // 文件
+  UPLOAD_TYPE_GROUP_AVATAR = 6; // 群头像
+}
+
+// ==================== 通用业务结构 ====================
+
+// 媒体文件信息
+message MediaInfo {
+  string media_id      = 1;  // 媒体文件唯一 ID
+  string url           = 2;  // 原始文件访问 URL
+  string thumbnail_url = 3;  // 缩略图 URL（图片/视频适用）
+  string file_name     = 4;  // 原始文件名
+  string mime_type     = 5;  // MIME 类型，如 image/jpeg
+  int64  file_size     = 6;  // 文件大小（字节）
+  int32  width         = 7;  // 宽度（图片/视频适用，像素）
+  int32  height        = 8;  // 高度（图片/视频适用，像素）
+  int32  duration      = 9;  // 时长（语音/视频适用，秒）
+  string md5           = 10; // 文件 MD5 校验值
+}
+
+// 用户简要信息
+message UserBrief {
+  string user_id    = 1; // 用户 ID
+  string nickname   = 2; // 用户昵称
+  string avatar_url = 3; // 用户头像 URL
+}
+
+// ==================== 通知类型 ====================
+
+// 通知类型枚举
+enum NotificationType {
+  NOTIFICATION_TYPE_UNSPECIFIED         = 0;  // 未指定类型
+  NOTIFICATION_TYPE_FRIEND_REQUEST      = 1;  // 好友请求
+  NOTIFICATION_TYPE_FRIEND_ACCEPTED     = 2;  // 好友请求已接受
+  NOTIFICATION_TYPE_FRIEND_REJECTED     = 3;  // 好友请求已拒绝
+  NOTIFICATION_TYPE_GROUP_INVITE        = 4;  // 群组邀请
+  NOTIFICATION_TYPE_GROUP_KICKED        = 5;  // 被踢出群组
+  NOTIFICATION_TYPE_GROUP_DISBANDED     = 6;  // 群组已解散
+  NOTIFICATION_TYPE_GROUP_ROLE_CHANGED  = 7;  // 群组角色变更
+  NOTIFICATION_TYPE_GROUP_ANNOUNCEMENT  = 8;  // 群公告
+  NOTIFICATION_TYPE_AT_MENTION          = 9;  // @提及
+  NOTIFICATION_TYPE_SYSTEM_ANNOUNCEMENT = 10; // 系统公告
+  NOTIFICATION_TYPE_CONTENT_MODERATION  = 11; // 内容审核通知
+  NOTIFICATION_TYPE_SECURITY_ALERT      = 12; // 安全警告
+}
+
+// ==================== 关系状态 ====================
+
+// 关系状态枚举
+enum RelationStatus {
+  RELATION_STATUS_UNSPECIFIED = 0; // 未指定
+  RELATION_STATUS_NONE        = 1; // 无关系
+  RELATION_STATUS_FRIEND      = 2; // 好友
+  RELATION_STATUS_BLOCKED     = 3; // 已拉黑对方
+  RELATION_STATUS_BLOCKED_BY  = 4; // 被对方拉黑
+}
+
+// ==================== 审计类型 ====================
+
+// 审计操作类型
+enum AuditAction {
+  AUDIT_ACTION_UNSPECIFIED      = 0;  // 未指定
+  AUDIT_ACTION_LOGIN            = 1;  // 登录
+  AUDIT_ACTION_LOGOUT           = 2;  // 登出
+  AUDIT_ACTION_SEND_MESSAGE     = 3;  // 发送消息
+  AUDIT_ACTION_RECALL_MESSAGE   = 4;  // 撤回消息
+  AUDIT_ACTION_CREATE_GROUP     = 5;  // 创建群组
+  AUDIT_ACTION_DISBAND_GROUP    = 6;  // 解散群组
+  AUDIT_ACTION_KICK_MEMBER      = 7;  // 踢出成员
+  AUDIT_ACTION_ADD_FRIEND       = 8;  // 添加好友
+  AUDIT_ACTION_DELETE_FRIEND    = 9;  // 删除好友
+  AUDIT_ACTION_BLOCK_USER       = 10; // 拉黑用户
+  AUDIT_ACTION_UPDATE_PROFILE   = 11; // 更新个人资料
+  AUDIT_ACTION_UPLOAD_MEDIA     = 12; // 上传媒体文件
+  AUDIT_ACTION_ADMIN_OPERATION  = 13; // 管理员操作
+}
+
+// 内容审核结果类型
+enum ModerationResult {
+  MODERATION_RESULT_UNSPECIFIED = 0; // 未指定
+  MODERATION_RESULT_PASS        = 1; // 审核通过
+  MODERATION_RESULT_REVIEW      = 2; // 需要人工复审
+  MODERATION_RESULT_REJECT      = 3; // 审核拒绝
+}
+
+// ==================== 群组相关 ====================
+
+// 群成员角色
+enum GroupMemberRole {
+  GROUP_MEMBER_ROLE_UNSPECIFIED = 0; // 未指定
+  GROUP_MEMBER_ROLE_OWNER       = 1; // 群主
+  GROUP_MEMBER_ROLE_ADMIN       = 2; // 管理员
+  GROUP_MEMBER_ROLE_MEMBER      = 3; // 普通成员
+}
+
+// 群组状态
+enum GroupStatus {
+  GROUP_STATUS_UNSPECIFIED = 0; // 未指定
+  GROUP_STATUS_NORMAL      = 1; // 正常
+  GROUP_STATUS_MUTED       = 2; // 全员禁言
+  GROUP_STATUS_DISBANDED   = 3; // 已解散
+}
+
+// 群申请类型
+enum GroupApplicationType {
+  GROUP_APPLICATION_TYPE_UNSPECIFIED = 0; // 未指定
+  GROUP_APPLICATION_TYPE_JOIN        = 1; // 主动申请加入
+  GROUP_APPLICATION_TYPE_INVITE      = 2; // 被邀请加入
+}
+
+// 群申请状态
+enum GroupApplicationStatus {
+  GROUP_APPLICATION_STATUS_UNSPECIFIED = 0; // 未指定
+  GROUP_APPLICATION_STATUS_PENDING     = 1; // 待处理
+  GROUP_APPLICATION_STATUS_APPROVED    = 2; // 已通过
+  GROUP_APPLICATION_STATUS_REJECTED    = 3; // 已拒绝
+  GROUP_APPLICATION_STATUS_EXPIRED     = 4; // 已过期
+}

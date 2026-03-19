@@ -1,0 +1,129 @@
+syntax = "proto3";
+package kafka.presence;
+option go_package = "proto_register/kafka/presence";
+
+import "common/common.proto";
+
+// =============================================================================
+// Presence 在线状态服务 Kafka 事件定义
+//
+// 在线状态服务负责用户在线/离线状态管理和订阅推送
+//
+// 【生产的 Topic】
+//   1. presence.online           - 用户上线
+//   2. presence.offline          - 用户下线
+//   3. presence.status.changed   - 状态变更（忙碌/离开/隐身等）
+//   4. presence.status.notify    - 状态变更通知（推送给订阅者）
+//   5. presence.subscribe        - 状态订阅
+//   6. presence.unsubscribe      - 取消订阅
+//   7. presence.typing           - 正在输入状态
+//   8. presence.stats            - 在线状态统计
+//
+// 【消费的 Topic】
+//   1. conn.connected            - 用户连接建立（来自 connecte）
+//   2. conn.disconnected         - 用户断开连接（来自 connecte，含心跳丢失场景）
+//   3. relation.friend.accepted  - 好友关系建立（来自 relation，自动建立双向状态订阅）
+//   4. relation.friend.deleted   - 好友关系删除（来自 relation，移除双向状态订阅）
+//   5. user.deactivated          - 账号注销（来自 user，清理所有 Presence 数据和订阅）
+//   6. config.changed            - 配置变更（来自 config，热更新心跳间隔/优雅期等）
+// =============================================================================
+
+// ============== 生产的事件 ==============
+
+// Topic: presence.online
+// 用户上线事件
+message PresenceOnlineEvent {
+  common.EventHeader  header       = 1;  // 事件头
+  string              user_id      = 2;  // 用户 ID
+  common.PlatformType platform     = 3;  // 上线平台
+  string              device_id    = 4;  // 设备 ID
+  string              server_id    = 5;  // 网关节点 ID
+  string              server_addr  = 6;  // 网关节点地址
+  int64               online_time  = 7;  // 上线时间
+  bool                is_reconnect = 8;  // 是否为重连
+}
+
+// Topic: presence.offline
+// 用户下线事件
+message PresenceOfflineEvent {
+  common.EventHeader  header          = 1; // 事件头
+  string              user_id         = 2; // 用户 ID
+  common.PlatformType platform        = 3; // 下线平台
+  string              device_id       = 4; // 设备 ID
+  string              reason          = 5; // 下线原因
+  int64               offline_time    = 6; // 下线时间
+  int64               online_duration = 7; // 本次在线时长（秒）
+}
+
+// Topic: presence.status.changed
+// 状态变更事件
+message PresenceStatusChangedEvent {
+  common.EventHeader  header        = 1; // 事件头
+  string              user_id       = 2; // 用户 ID
+  common.OnlineStatus old_status    = 3; // 旧状态
+  common.OnlineStatus new_status    = 4; // 新状态
+  string              custom_status = 5; // 自定义状态文本
+  common.PlatformType platform      = 6; // 操作平台
+  int64               change_time   = 7; // 变更时间
+}
+
+// Topic: presence.status.notify
+// 状态变更通知（推送给订阅了该用户状态的用户）
+message PresenceStatusNotifyEvent {
+  common.EventHeader  header         = 1; // 事件头
+  string              user_id        = 2; // 状态变更的用户 ID
+  common.OnlineStatus new_status     = 3; // 新状态
+  string              custom_status  = 4; // 自定义状态文本
+  repeated string     subscriber_ids = 5; // 需要通知的订阅者列表
+  int64               notify_time    = 6; // 通知时间
+}
+
+// Topic: presence.subscribe
+// 状态订阅事件
+message PresenceSubscribeEvent {
+  common.EventHeader header         = 1; // 事件头
+  string             subscriber_id  = 2; // 订阅者 ID
+  repeated string    target_ids     = 3; // 被订阅的用户 ID 列表
+  int64              subscribe_time = 4; // 订阅时间
+  int64              expire_at      = 5; // 订阅过期时间
+}
+
+// Topic: presence.unsubscribe
+// 取消订阅事件
+message PresenceUnsubscribeEvent {
+  common.EventHeader header           = 1; // 事件头
+  string             subscriber_id    = 2; // 订阅者 ID
+  repeated string    target_ids       = 3; // 取消订阅的用户 ID 列表
+  int64              unsubscribe_time = 4; // 取消订阅时间
+}
+
+// Topic: presence.typing
+// 正在输入状态事件
+message PresenceTypingEvent {
+  common.EventHeader header          = 1; // 事件头
+  string             user_id         = 2; // 正在输入的用户 ID
+  string             target_id       = 3; // 目标 ID（单聊为对方，群聊为 group_id）
+  string             conversation_id = 4; // 会话 ID
+  string             action          = 5; // 输入状态：typing / recording_voice / uploading_file
+  string             user_nickname   = 6; // 用户昵称
+}
+
+// Topic: presence.stats
+// 在线状态统计事件
+message PresenceStatsEvent {
+  common.EventHeader header              = 1;  // 事件头
+  string             server_id           = 2;  // 服务实例 ID
+  int64              period_start        = 3;  // 统计周期开始
+  int64              period_end          = 4;  // 统计周期结束
+  int64              online_user_count   = 5;  // 当前在线用户数
+  int64              peak_online_count   = 6;  // 峰值在线数
+  int64              online_event_count  = 7;  // 上线事件数
+  int64              offline_event_count = 8;  // 下线事件数
+  int64              status_change_count = 9;  // 状态变更数
+  int64              subscribe_count     = 10; // 订阅数
+}
+
+// ============== 消费的事件 ==============
+// Presence 消费的事件（conn.connected / conn.disconnected / relation.friend.accepted /
+// relation.friend.deleted / user.deactivated / config.changed）均使用各自源服务 proto 中定义的原始消息类型，
+// 无需在此定义消费侧辅助消息。

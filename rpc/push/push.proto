@@ -1,0 +1,208 @@
+syntax = "proto3";
+
+package push;
+
+option go_package = "proto_register/rpc/push";
+
+import "common/common.proto";
+
+// =============================================================================
+// Push 推送服务 — RPC 接口定义
+//
+// 核心职责：
+//   将轻量同步信号（sync notify）投递给在线用户（通过长连接网关）
+//   管理离线推送设备（APNs / FCM / 厂商通道）
+//   触发离线推送通知
+//
+// notify+sync 模式下的 Push 服务：
+//   - Push 服务 **不** 携带完整消息内容
+//   - 仅发送轻量 sync notify 信号：{type, conversation_id, max_seq, ...}
+//   - 客户端收到 notify 后自行调用 Message.PullMessages 拉取真实内容
+//   - 离线推送（APNs/FCM）仅携带通知标题和摘要，不含消息体
+//
+// 多端同步：
+//   - PushToUser 会向用户所有在线设备推送
+//   - PushToUserOtherDevices 用于发送者多端同步（排除当前发送设备）
+//
+// 大群优化策略：
+//   - 小群（<200人）：实时全量扇出
+//   - 大群（>=200人）：lazy notify，仅推送给活跃在线用户，其余等上线后通过
+//     OfflineQueue 批量同步
+//
+// 注意：Push 服务不存储消息，不了解消息内容细节
+// =============================================================================
+
+// ==================== 服务定义 ====================
+
+service PushService {
+  // 向单个用户推送 sync notify（在线推送，所有设备）
+  rpc PushToUser(PushToUserRequest) returns (PushToUserResponse);
+
+  // 向用户的其他设备推送（多端同步：排除当前设备）
+  rpc PushToUserOtherDevices(PushToUserOtherDevicesRequest) returns (PushToUserOtherDevicesResponse);
+
+  // 批量向多个用户推送 sync notify
+  rpc BatchPushToUsers(BatchPushToUsersRequest) returns (BatchPushToUsersResponse);
+
+  // 向群组所有在线成员推送 sync notify
+  rpc PushToGroup(PushToGroupRequest) returns (PushToGroupResponse);
+
+  // 全局广播推送
+  rpc BroadcastPush(BroadcastPushRequest) returns (BroadcastPushResponse);
+
+  // 注册推送设备（客户端上报 APNs/FCM token）
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+
+  // 注销推送设备
+  rpc UnregisterDevice(UnregisterDeviceRequest) returns (UnregisterDeviceResponse);
+
+  // 发送离线推送（APNs / FCM / 厂商通道）
+  rpc SendOfflinePush(SendOfflinePushRequest) returns (SendOfflinePushResponse);
+
+  // 查询用户已注册的推送设备列表
+  rpc GetUserDevices(GetUserDevicesRequest) returns (GetUserDevicesResponse);
+}
+
+// ==================== 推送信号类型 ====================
+
+// 同步通知信号（轻量，不含完整消息内容）
+message SyncNotifySignal {
+  string type      = 1; // 信号类型：new_msg / recall / read_receipt / system / presence / kicked
+  bytes  payload   = 2; // 信号载荷（protobuf 序列化或 JSON）
+  int64  seq       = 3; // 信号序号（排序和去重）
+  int64  timestamp = 4; // 信号生成时间戳（毫秒）
+}
+
+// 离线推送通知载荷（用于 APNs / FCM）
+message OfflinePushPayload {
+  string              push_id     = 1;  // 推送唯一 ID
+  string              title       = 2;  // 推送标题
+  string              content     = 3;  // 推送内容摘要
+  string              badge       = 4;  // 角标数（字符串形式）
+  string              sound       = 5;  // 提示音名称
+  string              image_url   = 6;  // 推送图片 URL（富文本推送）
+  map<string, string> data        = 7;  // 自定义数据字段
+  int64               expire_time = 8;  // 推送过期时间戳（毫秒）
+}
+
+// 推送设备信息
+message PushDevice {
+  string              device_id     = 1; // 设备唯一 ID
+  string              user_id       = 2; // 所属用户 ID
+  common.PlatformType platform      = 3; // 平台类型
+  string              push_token    = 4; // 推送 Token（APNs/FCM token）
+  string              push_channel  = 5; // 推送通道：apns / fcm / huawei / xiaomi / oppo / vivo
+  bool                enabled       = 6; // 是否启用推送
+  int64               registered_at = 7; // 注册时间戳（毫秒）
+}
+
+// ==================== 请求/响应 ====================
+
+// --- PushToUser ---
+message PushToUserRequest {
+  string           user_id     = 1; // 目标用户 ID
+  SyncNotifySignal signal      = 2; // 同步通知信号
+  bool             online_only = 3; // 仅推送在线用户（true 时跳过离线推送，用于已读回执等非关键信号）
+}
+
+message PushToUserResponse {
+  common.ResponseMeta meta   = 1; // 响应元信息
+  bool                online = 2; // 用户是否在线
+  bool                pushed = 3; // 是否成功推送
+}
+
+// --- PushToUserOtherDevices（多端同步）---
+message PushToUserOtherDevicesRequest {
+  string           user_id           = 1; // 用户 ID
+  string           exclude_device_id = 2; // 排除的设备 ID（当前操作设备）
+  SyncNotifySignal signal            = 3; // 同步通知信号
+}
+
+message PushToUserOtherDevicesResponse {
+  common.ResponseMeta meta         = 1; // 响应元信息
+  int32               pushed_count = 2; // 成功推送的设备数
+}
+
+// --- BatchPushToUsers ---
+message BatchPushToUsersRequest {
+  repeated string  user_ids = 1; // 目标用户 ID 列表
+  SyncNotifySignal signal   = 2; // 同步通知信号
+}
+
+message BatchPushToUsersResponse {
+  common.ResponseMeta meta          = 1; // 响应元信息
+  int32               online_count  = 2; // 在线用户数
+  int32               pushed_count  = 3; // 成功推送数
+  repeated string     offline_users = 4; // 不在线的用户 ID 列表
+}
+
+// --- PushToGroup（支持大群优化）---
+message PushToGroupRequest {
+  string           group_id          = 1; // 群组 ID
+  SyncNotifySignal signal            = 2; // 同步通知信号
+  repeated string  exclude_user_ids  = 3; // 排除的用户 ID 列表（发送者自己 + 已屏蔽用户等）
+  bool             large_group_lazy  = 4; // 是否使用大群 lazy 推送（仅推活跃在线用户）
+  repeated string  online_member_ids = 5; // 预查的在线成员 ID（优化：避免 Push 再查一次）
+}
+
+message PushToGroupResponse {
+  common.ResponseMeta meta          = 1; // 响应元信息
+  int32               total_members = 2; // 群成员总数
+  int32               pushed_count  = 3; // 成功推送数
+  repeated string     offline_users = 4; // 不在线的用户 ID 列表
+}
+
+// --- BroadcastPush ---
+message BroadcastPushRequest {
+  SyncNotifySignal             signal    = 1; // 广播信号
+  repeated common.PlatformType platforms = 2; // 目标平台列表（空表示全平台）
+}
+
+message BroadcastPushResponse {
+  common.ResponseMeta meta         = 1; // 响应元信息
+  int32               pushed_count = 2; // 成功推送数
+}
+
+// --- RegisterDevice ---
+message RegisterDeviceRequest {
+  string              user_id      = 1; // 用户 ID
+  string              device_id    = 2; // 设备 ID
+  common.PlatformType platform     = 3; // 平台类型
+  string              push_token   = 4; // 推送 Token
+  string              push_channel = 5; // 推送通道
+}
+
+message RegisterDeviceResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- UnregisterDevice ---
+message UnregisterDeviceRequest {
+  string user_id   = 1; // 用户 ID
+  string device_id = 2; // 设备 ID
+}
+
+message UnregisterDeviceResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- SendOfflinePush ---
+message SendOfflinePushRequest {
+  string             user_id = 1; // 目标用户 ID
+  OfflinePushPayload payload = 2; // 离线推送载荷
+}
+
+message SendOfflinePushResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+  bool                sent = 2; // 是否已发送到推送通道
+}
+
+// --- GetUserDevices ---
+message GetUserDevicesRequest {
+  string user_id = 1; // 用户 ID
+}
+
+message GetUserDevicesResponse {
+  common.ResponseMeta meta    = 1; // 响应元信息
+  repeated PushDevice devices = 2; // 设备列表
+}

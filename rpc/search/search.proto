@@ -1,0 +1,184 @@
+syntax = "proto3";
+
+package search;
+
+option go_package = "proto_register/rpc/search";
+
+import "common/common.proto";
+
+// =============================================================================
+// Search 全文搜索服务 — RPC 接口定义
+//
+// 核心职责：
+//   基于 Elasticsearch 提供用户、群组、消息的全文搜索能力
+//   搜索建议/自动补全
+//   全局统一搜索
+//   索引重建
+//
+// 隐私保护：
+//   - SearchUsers / SearchGroups 增加 searcher_user_id 字段
+//   - 服务端根据搜索发起人的隐私设置和被搜索人的隐私设置进行过滤
+//   - 例如：被搜用户关闭了 allow_search_by_username，则用户名搜索不返回该用户
+//   - SearchMessages 通过 user_id 限定只能搜索自己有权限访问的会话消息
+//
+// 职责边界：
+//   - 索引数据来源于各服务的 Kafka 事件（异步更新）
+//   - 不做权限管控（由 ApiGateway 网关层负责鉴权）
+// =============================================================================
+
+// ==================== 服务特有类型 ====================
+
+// 用户搜索结果
+message UserSearchResult {
+  string user_id    = 1; // 用户 ID
+  string username   = 2; // 用户名
+  string nickname   = 3; // 昵称
+  string avatar_url = 4; // 头像地址
+  string highlight  = 5; // 高亮匹配片段
+  double score      = 6; // 搜索相关性评分
+}
+
+// 群组搜索结果
+message GroupSearchResult {
+  string group_id     = 1; // 群组 ID
+  string name         = 2; // 群组名称
+  string avatar_url   = 3; // 群头像地址
+  int32  member_count = 4; // 群成员数量
+  string highlight    = 5; // 高亮匹配片段
+  double score        = 6; // 搜索相关性评分
+}
+
+// 消息搜索结果
+message MessageSearchResult {
+  string                  msg_id            = 1;  // 消息 ID
+  string                  conversation_id   = 2;  // 会话 ID
+  common.ConversationType conversation_type = 3;  // 会话类型
+  string                  sender_id         = 4;  // 发送者 ID
+  string                  sender_nickname   = 5;  // 发送者昵称
+  common.MessageType      message_type      = 6;  // 消息类型
+  string                  content           = 7;  // 消息内容
+  string                  highlight         = 8;  // 高亮匹配片段
+  int64                   send_time         = 9;  // 发送时间戳
+  double                  score             = 10; // 搜索相关性评分
+}
+
+// 统一搜索结果条目
+message SearchResultItem {
+  string type  = 1; // 结果类型（user / group / message）
+  bytes  data  = 2; // 序列化的结果数据
+  double score = 3; // 搜索相关性评分
+}
+
+// ==================== 服务定义 ====================
+
+service SearchService {
+  // 搜索用户（支持隐私过滤）
+  rpc SearchUsers(SearchUsersReq) returns (SearchUsersResp);
+  // 搜索群组（支持隐私过滤）
+  rpc SearchGroups(SearchGroupsReq) returns (SearchGroupsResp);
+  // 搜索消息（支持多维度过滤）
+  rpc SearchMessages(SearchMessagesReq) returns (SearchMessagesResp);
+  // 搜索好友
+  rpc SearchFriends(SearchFriendsReq) returns (SearchFriendsResp);
+  // 全局统一搜索
+  rpc GlobalSearch(GlobalSearchReq) returns (GlobalSearchResp);
+  // 搜索建议/自动补全
+  rpc SearchSuggest(SearchSuggestReq) returns (SearchSuggestResp);
+  // 触发索引重建
+  rpc RebuildIndex(RebuildIndexReq) returns (RebuildIndexResp);
+}
+
+// ==================== 请求/响应 ====================
+
+// --- SearchUsers ---
+message SearchUsersReq {
+  string            keyword         = 1; // 搜索关键词
+  common.Pagination pagination      = 2; // 分页参数
+  string            searcher_user_id = 3; // 搜索发起人 ID（用于隐私过滤）
+}
+
+message SearchUsersResp {
+  common.ResponseMeta        meta              = 1; // 响应元数据
+  repeated UserSearchResult  results           = 2; // 用户搜索结果列表
+  common.PaginationResult    pagination_result = 3; // 分页结果信息
+}
+
+// --- SearchGroups ---
+message SearchGroupsReq {
+  string            keyword         = 1; // 搜索关键词
+  common.Pagination pagination      = 2; // 分页参数
+  string            searcher_user_id = 3; // 搜索发起人 ID（用于隐私过滤）
+}
+
+message SearchGroupsResp {
+  common.ResponseMeta         meta              = 1; // 响应元数据
+  repeated GroupSearchResult  results           = 2; // 群组搜索结果列表
+  common.PaginationResult     pagination_result = 3; // 分页结果信息
+}
+
+// --- SearchMessages ---
+message SearchMessagesReq {
+  string                  keyword           = 1; // 搜索关键词
+  string                  user_id           = 2; // 搜索用户 ID（限定权限范围）
+  string                  conversation_id   = 3; // 指定会话 ID（可选）
+  common.ConversationType conversation_type = 4; // 指定会话类型（可选）
+  common.MessageType      message_type      = 5; // 指定消息类型（可选）
+  common.TimeRange        time_range        = 6; // 时间范围过滤（可选）
+  common.Pagination       pagination        = 7; // 分页参数
+}
+
+message SearchMessagesResp {
+  common.ResponseMeta           meta              = 1; // 响应元数据
+  repeated MessageSearchResult  results           = 2; // 消息搜索结果列表
+  common.PaginationResult       pagination_result = 3; // 分页结果信息
+}
+
+// --- SearchFriends ---
+message SearchFriendsReq {
+  string            user_id    = 1; // 用户 ID
+  string            keyword    = 2; // 搜索关键词
+  common.Pagination pagination = 3; // 分页参数
+}
+
+message SearchFriendsResp {
+  common.ResponseMeta        meta              = 1; // 响应元数据
+  repeated UserSearchResult  results           = 2; // 好友搜索结果列表
+  common.PaginationResult    pagination_result = 3; // 分页结果信息
+}
+
+// --- GlobalSearch ---
+message GlobalSearchReq {
+  string            keyword    = 1; // 搜索关键词
+  string            user_id    = 2; // 搜索用户 ID
+  repeated string   types      = 3; // 搜索范围类型列表（user / group / message）
+  common.Pagination pagination = 4; // 分页参数
+}
+
+message GlobalSearchResp {
+  common.ResponseMeta        meta              = 1; // 响应元数据
+  repeated SearchResultItem  results           = 2; // 统一搜索结果列表
+  common.PaginationResult    pagination_result = 3; // 分页结果信息
+}
+
+// --- SearchSuggest ---
+message SearchSuggestReq {
+  string keyword = 1; // 输入关键词前缀
+  string user_id = 2; // 用户 ID
+  int32  limit   = 3; // 返回建议数量上限
+}
+
+message SearchSuggestResp {
+  common.ResponseMeta meta        = 1; // 响应元数据
+  repeated string     suggestions = 2; // 搜索建议列表
+}
+
+// --- RebuildIndex ---
+message RebuildIndexReq {
+  string index_type  = 1; // 索引类型（user / group / message / all）
+  string operator_id = 2; // 操作人 ID
+}
+
+message RebuildIndexResp {
+  common.ResponseMeta meta    = 1; // 响应元数据
+  string               task_id = 2; // 重建任务 ID
+}

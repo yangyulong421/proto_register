@@ -1,0 +1,117 @@
+syntax = "proto3";
+package kafka.relation;
+option go_package = "proto_register/kafka/relation";
+
+import "common/common.proto";
+
+// =============================================================================
+// Relation 关系链服务 Kafka 事件定义
+//
+// 关系链服务管理好友关系、黑名单等社交关系
+//
+// 【生产的 Topic】
+//   1. relation.friend.request    - 好友申请
+//   2. relation.friend.accepted   - 好友通过
+//   3. relation.friend.rejected   - 好友拒绝
+//   4. relation.friend.deleted    - 好友删除
+//   5. relation.blocked           - 拉黑用户
+//   6. relation.unblocked         - 取消拉黑
+//   7. relation.remark.updated    - 备注修改
+//   8. relation.stats             - 关系链统计
+//
+// 【消费的 Topic】
+//   1. user.deactivated           - 账号注销（来自 user，清理关系）
+//   2. user.banned                - 账号封禁（来自 user）
+//   3. audit.content.violation    - 违规处理（来自 audit）
+//   4. config.changed             - 配置变更（来自 config）
+// =============================================================================
+
+// ============== 生产的事件 ==============
+
+// Topic: relation.friend.request
+// 好友申请事件
+message FriendRequestEvent {
+  common.EventHeader header        = 1; // 事件头
+  string             request_id    = 2; // 申请 ID
+  string             from_user_id  = 3; // 申请者 ID
+  string             to_user_id    = 4; // 被申请者 ID
+  string             from_nickname = 5; // 申请者昵称
+  string             from_avatar   = 6; // 申请者头像
+  string             message       = 7; // 申请留言
+  string             source        = 8; // 来源：search / group / qrcode / card
+  int64              create_time   = 9; // 申请时间
+}
+
+// Topic: relation.friend.accepted
+// 好友通过事件
+message FriendAcceptedEvent {
+  common.EventHeader header       = 1; // 事件头
+  string             request_id   = 2; // 申请 ID
+  string             from_user_id = 3; // 原申请者 ID
+  string             to_user_id   = 4; // 接受者 ID
+  int64              accept_time  = 5; // 通过时间
+}
+
+// Topic: relation.friend.rejected
+// 好友拒绝事件
+message FriendRejectedEvent {
+  common.EventHeader header       = 1; // 事件头
+  string             request_id   = 2; // 申请 ID
+  string             from_user_id = 3; // 原申请者 ID
+  string             to_user_id   = 4; // 拒绝者 ID
+  string             reason       = 5; // 拒绝原因
+  int64              reject_time  = 6; // 拒绝时间
+}
+
+// Topic: relation.friend.deleted
+// 好友删除事件
+message FriendDeletedEvent {
+  common.EventHeader header      = 1; // 事件头
+  string             operator_id = 2; // 操作者 ID
+  string             target_id   = 3; // 被删除者 ID
+  int64              delete_time = 4; // 删除时间
+}
+
+// Topic: relation.blocked
+// 拉黑用户事件
+message UserBlockedEvent {
+  common.EventHeader header      = 1; // 事件头
+  string             operator_id = 2; // 操作者 ID
+  string             blocked_id  = 3; // 被拉黑者 ID
+  int64              block_time  = 4; // 拉黑时间
+}
+
+// Topic: relation.unblocked
+// 取消拉黑事件
+message UserUnblockedEvent {
+  common.EventHeader header       = 1; // 事件头
+  string             operator_id  = 2; // 操作者 ID
+  string             blocked_id   = 3; // 被解除拉黑者 ID
+  int64              unblock_time = 4; // 解除拉黑时间
+}
+
+// Topic: relation.remark.updated
+// 好友备注修改事件
+message RemarkUpdatedEvent {
+  common.EventHeader header      = 1; // 事件头
+  string             user_id     = 2; // 修改者 ID
+  string             friend_id   = 3; // 好友 ID
+  string             old_remark  = 4; // 旧备注
+  string             new_remark  = 5; // 新备注
+  int64              update_time = 6; // 修改时间
+}
+
+// Topic: relation.stats
+// 关系链统计事件
+message RelationStatsEvent {
+  common.EventHeader header               = 1;  // 事件头
+  string             server_id            = 2;  // 服务实例 ID
+  int64              period_start         = 3;  // 统计周期开始
+  int64              period_end           = 4;  // 统计周期结束
+  int64              friend_request_count = 5;  // 好友申请数
+  int64              friend_accept_count  = 6;  // 好友通过数
+  int64              friend_reject_count  = 7;  // 好友拒绝数
+  int64              friend_delete_count  = 8;  // 好友删除数
+  int64              block_count          = 9;  // 拉黑数
+  int64              unblock_count        = 10; // 解除拉黑数
+}

@@ -1,0 +1,183 @@
+syntax = "proto3";
+
+package presence;
+
+option go_package = "proto_register/rpc/presence";
+
+import "common/common.proto";
+
+// =============================================================================
+// Presence 在线状态服务 — RPC 接口定义
+//
+// 核心职责：
+//   是在线状态的唯一权威来源
+//   管理用户在线状态（在线/离线/忙碌/离开/隐身）
+//   维护用户在各平台/设备的连接信息
+//   支持订阅/取消订阅好友状态变更
+//   支持"正在输入"等实时状态提示
+//
+// User 服务不应直接查询在线状态，应通过 Presence 服务获取。
+// =============================================================================
+
+// ==================== 服务定义 ====================
+
+service PresenceService {
+  // 设置用户状态（忙碌/离开/隐身等）
+  rpc SetPresence(SetPresenceRequest) returns (SetPresenceResponse);
+
+  // 获取用户在线状态信息
+  rpc GetPresence(GetPresenceRequest) returns (GetPresenceResponse);
+
+  // 批量获取在线状态
+  rpc BatchGetPresence(BatchGetPresenceRequest) returns (BatchGetPresenceResponse);
+
+  // 订阅用户状态变更
+  rpc SubscribePresence(SubscribePresenceRequest) returns (SubscribePresenceResponse);
+
+  // 取消订阅用户状态变更
+  rpc UnsubscribePresence(UnsubscribePresenceRequest) returns (UnsubscribePresenceResponse);
+
+  // 用户上线（内部接口，由 connecte 服务调用）
+  rpc UserOnline(UserOnlineRequest) returns (UserOnlineResponse);
+
+  // 用户下线（内部接口）
+  rpc UserOffline(UserOfflineRequest) returns (UserOfflineResponse);
+
+  // 心跳保活
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // 获取在线用户总数
+  rpc GetOnlineCount(GetOnlineCountRequest) returns (GetOnlineCountResponse);
+
+  // 发送正在输入状态提示
+  rpc SendTypingIndicator(SendTypingIndicatorRequest) returns (SendTypingIndicatorResponse);
+}
+
+// ==================== 数据结构 ====================
+
+// 在线状态详情
+message PresenceInfo {
+  string              user_id       = 1; // 用户 ID
+  common.OnlineStatus status        = 2; // 在线状态
+  common.PlatformType platform      = 3; // 平台类型
+  string              device_id     = 4; // 设备唯一标识
+  string              server_id     = 5; // 连接所在服务器 ID
+  int64               last_active   = 6; // 最后活跃时间戳（毫秒）
+  string              custom_status = 7; // 自定义状态文案
+}
+
+// ==================== 请求/响应 ====================
+
+// --- SetPresence ---
+message SetPresenceRequest {
+  string              user_id       = 1; // 用户 ID
+  common.OnlineStatus status        = 2; // 目标在线状态
+  string              custom_status = 3; // 自定义状态文案
+  common.PlatformType platform      = 4; // 平台类型
+  string              device_id     = 5; // 设备唯一标识
+}
+
+message SetPresenceResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}
+
+// --- GetPresence ---
+message GetPresenceRequest {
+  string user_id = 1; // 目标用户 ID
+}
+
+message GetPresenceResponse {
+  common.ResponseMeta  meta      = 1; // 响应元数据
+  repeated PresenceInfo presences = 2; // 该用户所有设备的在线状态列表
+}
+
+// --- BatchGetPresence ---
+message BatchGetPresenceRequest {
+  repeated string user_ids = 1; // 目标用户 ID 列表
+}
+
+message BatchGetPresenceResponse {
+  common.ResponseMeta  meta      = 1; // 响应元数据
+  repeated PresenceInfo presences = 2; // 各用户的在线状态列表
+}
+
+// --- SubscribePresence ---
+message SubscribePresenceRequest {
+  string          user_id         = 1; // 订阅者用户 ID
+  repeated string target_user_ids = 2; // 要订阅的目标用户 ID 列表
+}
+
+message SubscribePresenceResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}
+
+// --- UnsubscribePresence ---
+message UnsubscribePresenceRequest {
+  string          user_id         = 1; // 订阅者用户 ID
+  repeated string target_user_ids = 2; // 要取消订阅的目标用户 ID 列表
+}
+
+message UnsubscribePresenceResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}
+
+// --- UserOnline ---
+message UserOnlineRequest {
+  string              user_id   = 1; // 用户 ID
+  common.PlatformType platform  = 2; // 平台类型
+  string              device_id = 3; // 设备唯一标识
+  string              server_id = 4; // 连接所在服务器 ID
+  string              conn_id   = 5; // 连接 ID
+}
+
+message UserOnlineResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}
+
+// --- UserOffline ---
+message UserOfflineRequest {
+  string              user_id   = 1; // 用户 ID
+  common.PlatformType platform  = 2; // 平台类型
+  string              device_id = 3; // 设备唯一标识
+  string              server_id = 4; // 连接所在服务器 ID
+  string              conn_id   = 5; // 连接 ID
+}
+
+message UserOfflineResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}
+
+// --- Heartbeat ---
+message HeartbeatRequest {
+  string              user_id   = 1; // 用户 ID
+  common.PlatformType platform  = 2; // 平台类型
+  string              device_id = 3; // 设备唯一标识
+}
+
+message HeartbeatResponse {
+  common.ResponseMeta meta        = 1; // 响应元数据
+  int64               server_time = 2; // 服务端时间戳（毫秒）
+}
+
+// --- GetOnlineCount ---
+message GetOnlineCountRequest {
+  common.PlatformType platform = 1; // 按平台过滤（UNSPECIFIED 表示全部）
+}
+
+message GetOnlineCountResponse {
+  common.ResponseMeta meta            = 1; // 响应元数据
+  int64               online_count    = 2; // 在线用户总数
+  map<string, int64>  platform_counts = 3; // 各平台在线数量
+}
+
+// --- SendTypingIndicator ---
+message SendTypingIndicatorRequest {
+  string user_id         = 1; // 发送者用户 ID
+  string conversation_id = 2; // 会话 ID
+  string target_id       = 3; // 目标用户 ID（单聊）或 group_id（群聊）
+  string action          = 4; // 输入状态：typing / recording_voice / uploading_file
+}
+
+message SendTypingIndicatorResponse {
+  common.ResponseMeta meta = 1; // 响应元数据
+}

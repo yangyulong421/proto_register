@@ -1,0 +1,266 @@
+syntax = "proto3";
+
+package media;
+
+option go_package = "proto_register/rpc/media";
+
+import "common/common.proto";
+
+// =============================================================================
+// Media 媒体文件服务 — RPC 接口定义
+//
+// 核心职责：
+//   多媒体文件管理：上传凭证获取、上传回调、缩略图/截图生成
+//   文件下载地址生成（带签名和过期时间）
+//   媒体处理状态跟踪（转码、病毒扫描等）
+//   分片上传支持（大文件场景）
+//
+// 上传流程：
+//   小文件（< 5MB）：GetUploadCredential → 客户端直传 OSS → UploadCallback
+//   大文件（≥ 5MB）：InitMultipartUpload → GetPartUploadUrl(循环) → CompleteMultipartUpload
+//
+// 职责边界：
+//   - 不处理消息内容（消息存储属于 Message 服务）
+//   - 文件实际存储在对象存储（OSS/S3），本服务管理元信息
+// =============================================================================
+
+// ==================== 服务特有类型 ====================
+
+// 媒体记录（完整存储记录）
+message MediaRecord {
+  string                    media_id       = 1;  // 媒体唯一标识
+  string                    user_id        = 2;  // 上传用户 ID
+  common.UploadType         upload_type    = 3;  // 上传类型
+  string                    file_name      = 4;  // 文件名称
+  string                    mime_type      = 5;  // MIME 类型
+  int64                     file_size      = 6;  // 文件大小（字节）
+  string                    url            = 7;  // 媒体访问地址
+  string                    thumbnail_url  = 8;  // 缩略图地址
+  int32                     width          = 9;  // 宽度（像素）
+  int32                     height         = 10; // 高度（像素）
+  int32                     duration       = 11; // 时长（秒，音视频适用）
+  string                    md5            = 12; // 文件 MD5 校验值
+  common.MediaProcessStatus process_status = 13; // 处理状态
+  int64                     created_at     = 14; // 创建时间戳
+}
+
+// 分片上传信息
+message MultipartUploadInfo {
+  string upload_id   = 1; // 分片上传 ID
+  string media_id    = 2; // 媒体 ID
+  int32  total_parts = 3; // 总分片数
+  int64  part_size   = 4; // 每个分片大小（字节）
+}
+
+// ==================== 服务定义 ====================
+
+service MediaService {
+  // ---- 普通上传 ----
+  // 获取上传凭证（客户端直传）
+  rpc GetUploadCredential(GetUploadCredentialReq) returns (GetUploadCredentialResp);
+  // 上传完成回调
+  rpc UploadCallback(UploadCallbackReq) returns (UploadCallbackResp);
+
+  // ---- 分片上传（大文件） ----
+  // 初始化分片上传
+  rpc InitMultipartUpload(InitMultipartUploadReq) returns (InitMultipartUploadResp);
+  // 获取分片上传地址
+  rpc GetPartUploadUrl(GetPartUploadUrlReq) returns (GetPartUploadUrlResp);
+  // 完成分片上传
+  rpc CompleteMultipartUpload(CompleteMultipartUploadReq) returns (CompleteMultipartUploadResp);
+  // 取消分片上传
+  rpc AbortMultipartUpload(AbortMultipartUploadReq) returns (AbortMultipartUploadResp);
+
+  // ---- 查询与下载 ----
+  // 获取单个媒体信息
+  rpc GetMediaInfo(GetMediaInfoReq) returns (GetMediaInfoResp);
+  // 批量获取媒体信息
+  rpc BatchGetMediaInfo(BatchGetMediaInfoReq) returns (BatchGetMediaInfoResp);
+  // 获取下载地址（带过期时间）
+  rpc GetDownloadUrl(GetDownloadUrlReq) returns (GetDownloadUrlResp);
+
+  // ---- 媒体处理 ----
+  // 获取自定义尺寸缩略图
+  rpc GetThumbnailUrl(GetThumbnailUrlReq) returns (GetThumbnailUrlResp);
+  // 获取视频指定时间截图
+  rpc GetVideoSnapshot(GetVideoSnapshotReq) returns (GetVideoSnapshotResp);
+  // 获取媒体处理状态
+  rpc GetMediaProcessStatus(GetMediaProcessStatusReq) returns (GetMediaProcessStatusResp);
+
+  // ---- 管理 ----
+  // 删除媒体
+  rpc DeleteMedia(DeleteMediaReq) returns (DeleteMediaResp);
+}
+
+// ==================== 请求/响应 ====================
+
+// --- GetUploadCredential ---
+message GetUploadCredentialReq {
+  string            user_id     = 1; // 用户 ID
+  common.UploadType upload_type = 2; // 上传类型
+  string            file_name   = 3; // 文件名称
+  string            mime_type   = 4; // MIME 类型
+  int64             file_size   = 5; // 文件大小（字节）
+  string            md5         = 6; // 文件 MD5 校验值
+}
+
+message GetUploadCredentialResp {
+  common.ResponseMeta meta         = 1; // 响应元数据
+  string              upload_url   = 2; // 上传地址
+  string              upload_token = 3; // 上传凭证令牌
+  string              media_id     = 4; // 分配的媒体 ID
+  int64               expire_at    = 5; // 凭证过期时间戳
+  map<string, string> headers      = 6; // 上传时需携带的请求头
+}
+
+// --- UploadCallback ---
+message UploadCallbackReq {
+  string media_id  = 1; // 媒体 ID
+  string user_id   = 2; // 用户 ID
+  bool   success   = 3; // 上传是否成功
+  string url       = 4; // 文件最终存储地址
+  int64  file_size = 5; // 实际文件大小（字节）
+  string md5       = 6; // 实际文件 MD5
+}
+
+message UploadCallbackResp {
+  common.ResponseMeta meta       = 1; // 响应元数据
+  common.MediaInfo    media_info = 2; // 处理后的媒体信息
+}
+
+// --- InitMultipartUpload ---
+message InitMultipartUploadReq {
+  string            user_id     = 1; // 用户 ID
+  common.UploadType upload_type = 2; // 上传类型
+  string            file_name   = 3; // 文件名称
+  string            mime_type   = 4; // MIME 类型
+  int64             file_size   = 5; // 文件总大小（字节）
+  string            md5         = 6; // 文件整体 MD5 校验值
+  int64             part_size   = 7; // 建议的分片大小（字节，默认 5MB）
+}
+
+message InitMultipartUploadResp {
+  common.ResponseMeta  meta        = 1; // 响应元数据
+  MultipartUploadInfo  upload_info = 2; // 分片上传信息
+}
+
+// --- GetPartUploadUrl ---
+message GetPartUploadUrlReq {
+  string upload_id   = 1; // 分片上传 ID
+  string media_id    = 2; // 媒体 ID
+  int32  part_number = 3; // 分片序号（从 1 开始）
+}
+
+message GetPartUploadUrlResp {
+  common.ResponseMeta meta       = 1; // 响应元数据
+  string              upload_url = 2; // 分片上传地址
+  int64               expire_at  = 3; // 上传地址过期时间戳
+  map<string, string> headers    = 4; // 上传时需携带的请求头
+}
+
+// 分片完成信息
+message CompletedPart {
+  int32  part_number = 1; // 分片序号
+  string etag        = 2; // 分片上传后返回的 ETag
+}
+
+// --- CompleteMultipartUpload ---
+message CompleteMultipartUploadReq {
+  string               upload_id = 1; // 分片上传 ID
+  string               media_id  = 2; // 媒体 ID
+  string               user_id   = 3; // 用户 ID
+  repeated CompletedPart parts    = 4; // 所有分片完成信息
+}
+
+message CompleteMultipartUploadResp {
+  common.ResponseMeta meta       = 1; // 响应元数据
+  common.MediaInfo    media_info = 2; // 完整的媒体信息
+}
+
+// --- AbortMultipartUpload ---
+message AbortMultipartUploadReq {
+  string upload_id = 1; // 分片上传 ID
+  string media_id  = 2; // 媒体 ID
+  string user_id   = 3; // 用户 ID
+}
+
+message AbortMultipartUploadResp {
+  common.ResponseMeta meta = 1; // 响应元数据
+}
+
+// --- GetMediaInfo ---
+message GetMediaInfoReq {
+  string media_id = 1; // 媒体 ID
+}
+
+message GetMediaInfoResp {
+  common.ResponseMeta meta       = 1; // 响应元数据
+  common.MediaInfo    media_info = 2; // 媒体信息
+}
+
+// --- BatchGetMediaInfo ---
+message BatchGetMediaInfoReq {
+  repeated string media_ids = 1; // 媒体 ID 列表
+}
+
+message BatchGetMediaInfoResp {
+  common.ResponseMeta       meta        = 1; // 响应元数据
+  repeated common.MediaInfo media_infos = 2; // 媒体信息列表
+}
+
+// --- GetDownloadUrl ---
+message GetDownloadUrlReq {
+  string media_id = 1; // 媒体 ID
+  string user_id  = 2; // 请求用户 ID
+}
+
+message GetDownloadUrlResp {
+  common.ResponseMeta meta         = 1; // 响应元数据
+  string              download_url = 2; // 下载地址
+  int64               expire_at    = 3; // 下载链接过期时间戳
+}
+
+// --- GetThumbnailUrl ---
+message GetThumbnailUrlReq {
+  string media_id = 1; // 媒体 ID
+  int32  width    = 2; // 目标缩略图宽度（像素）
+  int32  height   = 3; // 目标缩略图高度（像素）
+}
+
+message GetThumbnailUrlResp {
+  common.ResponseMeta meta          = 1; // 响应元数据
+  string              thumbnail_url = 2; // 缩略图地址
+}
+
+// --- GetVideoSnapshot ---
+message GetVideoSnapshotReq {
+  string media_id    = 1; // 媒体 ID
+  int32  time_offset = 2; // 截图时间偏移量（秒）
+}
+
+message GetVideoSnapshotResp {
+  common.ResponseMeta meta         = 1; // 响应元数据
+  string              snapshot_url = 2; // 视频截图地址
+}
+
+// --- GetMediaProcessStatus ---
+message GetMediaProcessStatusReq {
+  string media_id = 1; // 媒体 ID
+}
+
+message GetMediaProcessStatusResp {
+  common.ResponseMeta       meta           = 1; // 响应元数据
+  common.MediaProcessStatus process_status = 2; // 当前处理状态
+  int32                     progress       = 3; // 处理进度百分比
+  string                    fail_reason    = 4; // 失败原因（失败时有值）
+}
+
+// --- DeleteMedia ---
+message DeleteMediaReq {
+  string media_id = 1; // 媒体 ID
+  string user_id  = 2; // 操作用户 ID
+}
+
+message DeleteMediaResp {
+  common.ResponseMeta meta = 1; // 响应元数据
+}

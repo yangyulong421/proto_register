@@ -1,0 +1,271 @@
+syntax = "proto3";
+
+package call;
+
+option go_package = "proto_register/rpc/call";
+
+import "common/common.proto";
+
+// =============================================================================
+// Call 音视频通话服务 — RPC 接口定义
+//
+// 核心职责：
+//   音视频通话信令管理（创建/加入/离开/拒绝/结束通话）
+//   LiveKit Token 签发（内部调用 LiveKit Server API）
+//   通话记录存储与查询
+//   通话状态管理（进行中/已结束/未接来电）
+//
+// 通话信令流程：
+//   1. 用户 A 调用 CreateCall → Call 服务创建 LiveKit Room → 生成 Token → 返回 {call_id, token, room_name}
+//   2. Call 服务发送 Kafka call.initiated 事件
+//   3. Push 服务消费事件 → 向用户 B 推送 call_signal sync notify（含 call_id、caller 信息）
+//   4. 用户 B 收到信令 → UI 展示来电界面 → 用户点击接听 → 调用 JoinCall
+//   5. JoinCall 返回 LiveKit Token → 用户 B 使用 Token 连接 LiveKit Room
+//   6. 通话结束 → 任一方调用 EndCall → Call 服务更新通话记录 → 发送 call.ended 事件
+//
+// 群通话支持：
+//   - 复用群会话通道，创建群通话时 call_type = GROUP
+//   - 群成员可随时 JoinCall 加入（类似会议室模式）
+//   - 通话参与者列表独立管理（不等于群成员列表）
+//
+// LiveKit 集成：
+//   - Call 服务作为 LiveKit 的控制面，负责 Room 创建/销毁、Token 签发
+//   - 音视频数据流不经过 Call 服务（客户端直连 LiveKit SFU）
+//   - Token 有效期 24h，客户端可通过 GetCallToken 刷新
+//
+// 注意：
+//   - 信令通过 Push 服务 sync notify 推送（type: "call_signal"），不走单独通道
+//   - 通话记录存储在 Call 服务自有 PgSQL 表 `call_records`
+//   - 通话状态推送到 `call.*` Kafka topic，Push 服务消费后推送信令给相关用户
+// =============================================================================
+
+// ==================== 服务特有类型 ====================
+
+// 通话类型
+enum CallType {
+  CALL_TYPE_UNSPECIFIED = 0; // 未指定
+  CALL_TYPE_AUDIO       = 1; // 语音通话
+  CALL_TYPE_VIDEO       = 2; // 视频通话
+}
+
+// 通话状态
+enum CallStatus {
+  CALL_STATUS_UNSPECIFIED = 0; // 未指定
+  CALL_STATUS_RINGING     = 1; // 响铃中（等待接听）
+  CALL_STATUS_CONNECTED   = 2; // 通话中
+  CALL_STATUS_ENDED       = 3; // 已正常结束
+  CALL_STATUS_MISSED      = 4; // 未接来电
+  CALL_STATUS_REJECTED    = 5; // 已拒绝
+  CALL_STATUS_CANCELLED   = 6; // 已取消（发起方取消）
+  CALL_STATUS_BUSY        = 7; // 忙线
+  CALL_STATUS_FAILED      = 8; // 通话失败（网络等问题）
+}
+
+// 通话结束原因
+enum CallEndReason {
+  CALL_END_REASON_UNSPECIFIED    = 0; // 未指定
+  CALL_END_REASON_NORMAL         = 1; // 正常挂断
+  CALL_END_REASON_TIMEOUT        = 2; // 超时未接听（60s）
+  CALL_END_REASON_REJECTED       = 3; // 对方拒绝
+  CALL_END_REASON_CANCELLED      = 4; // 发起方取消
+  CALL_END_REASON_BUSY           = 5; // 对方忙线
+  CALL_END_REASON_NETWORK_ERROR  = 6; // 网络断开
+  CALL_END_REASON_SERVER_ERROR   = 7; // 服务端异常
+}
+
+// 通话记录
+message CallRecord {
+  string                  call_id           = 1;  // 通话唯一 ID（Snowflake）
+  CallType                call_type         = 2;  // 通话类型（语音/视频）
+  CallStatus              status            = 3;  // 通话状态
+  string                  caller_id         = 4;  // 发起方用户 ID
+  string                  receiver_id       = 5;  // 接收方 ID（单聊为 user_id，群通话为 group_id）
+  common.ConversationType conversation_type = 6;  // 会话类型（单聊/群聊）
+  string                  conversation_id   = 7;  // 关联会话 ID
+  string                  room_name         = 8;  // LiveKit Room 名称
+  repeated CallParticipant participants     = 9;  // 参与者列表
+  int64                   initiated_at      = 10; // 发起时间戳（毫秒）
+  int64                   connected_at      = 11; // 接通时间戳（毫秒，0 表示未接通）
+  int64                   ended_at          = 12; // 结束时间戳（毫秒，0 表示进行中）
+  int32                   duration          = 13; // 通话时长（秒，0 表示未接通）
+  CallEndReason           end_reason        = 14; // 结束原因
+  string                  extra             = 15; // 扩展字段（JSON）
+}
+
+// 通话参与者信息
+message CallParticipant {
+  string              user_id   = 1; // 参与者用户 ID
+  string              nickname  = 2; // 参与者昵称
+  string              avatar_url = 3; // 参与者头像 URL
+  common.PlatformType platform  = 4; // 参与者平台
+  int64               joined_at = 5; // 加入时间戳（毫秒）
+  int64               left_at   = 6; // 离开时间戳（毫秒，0 表示仍在通话中）
+  bool                is_muted  = 7; // 是否静音
+  bool                is_camera_off = 8; // 是否关闭摄像头
+}
+
+// ==================== 服务定义 ====================
+
+service CallService {
+  // 发起通话（创建 LiveKit Room + 签发 Token）
+  // 返回 call_id 和 caller 的 LiveKit Token
+  // 触发 Kafka call.initiated 事件 → Push 服务推送信令给接收方
+  rpc CreateCall(CreateCallRequest) returns (CreateCallResponse);
+
+  // 加入通话（获取 LiveKit Token）
+  // 接收方接听 或 群成员加入时调用
+  rpc JoinCall(JoinCallRequest) returns (JoinCallResponse);
+
+  // 离开通话（参与者主动离开，通话不结束）
+  // 仅群通话场景，单聊离开等同于结束
+  rpc LeaveCall(LeaveCallRequest) returns (LeaveCallResponse);
+
+  // 拒绝通话
+  rpc RejectCall(RejectCallRequest) returns (RejectCallResponse);
+
+  // 结束通话（任一方可调用，单聊两方都断开，群通话仅自己离开）
+  rpc EndCall(EndCallRequest) returns (EndCallResponse);
+
+  // 获取/刷新 LiveKit Token
+  // Token 有效期 24h，长时间通话需要刷新
+  rpc GetCallToken(GetCallTokenRequest) returns (GetCallTokenResponse);
+
+  // 获取通话历史记录
+  rpc GetCallHistory(GetCallHistoryRequest) returns (GetCallHistoryResponse);
+
+  // 查询当前进行中的通话
+  rpc GetActiveCall(GetActiveCallRequest) returns (GetActiveCallResponse);
+
+  // 更新通话媒体状态（静音/关闭摄像头）
+  rpc UpdateCallMedia(UpdateCallMediaRequest) returns (UpdateCallMediaResponse);
+
+  // 取消通话（发起方在对方接听前取消）
+  rpc CancelCall(CancelCallRequest) returns (CancelCallResponse);
+}
+
+// ==================== 请求/响应 ====================
+
+// --- CreateCall ---
+message CreateCallRequest {
+  string                  caller_id         = 1; // 发起方用户 ID
+  string                  receiver_id       = 2; // 接收方 ID（单聊 user_id / 群聊 group_id）
+  common.ConversationType conversation_type = 3; // 会话类型
+  CallType                call_type         = 4; // 通话类型（语音/视频）
+  string                  device_id         = 5; // 发起方设备 ID
+}
+
+message CreateCallResponse {
+  common.ResponseMeta meta       = 1; // 响应元信息
+  string              call_id    = 2; // 通话 ID
+  string              token      = 3; // 发起方的 LiveKit Token
+  string              room_name  = 4; // LiveKit Room 名称
+  string              livekit_url = 5; // LiveKit 服务地址
+}
+
+// --- JoinCall ---
+message JoinCallRequest {
+  string user_id   = 1; // 加入者用户 ID
+  string call_id   = 2; // 通话 ID
+  string device_id = 3; // 设备 ID
+}
+
+message JoinCallResponse {
+  common.ResponseMeta meta        = 1; // 响应元信息
+  string              token       = 2; // 加入者的 LiveKit Token
+  string              room_name   = 3; // LiveKit Room 名称
+  string              livekit_url = 4; // LiveKit 服务地址
+  CallRecord          call_info   = 5; // 当前通话信息
+}
+
+// --- LeaveCall ---
+message LeaveCallRequest {
+  string user_id = 1; // 用户 ID
+  string call_id = 2; // 通话 ID
+}
+
+message LeaveCallResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- RejectCall ---
+message RejectCallRequest {
+  string user_id = 1; // 拒绝者用户 ID
+  string call_id = 2; // 通话 ID
+  string reason  = 3; // 拒绝原因（可选：busy / manual）
+}
+
+message RejectCallResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- EndCall ---
+message EndCallRequest {
+  string        user_id    = 1; // 操作者用户 ID
+  string        call_id    = 2; // 通话 ID
+  CallEndReason end_reason = 3; // 结束原因
+}
+
+message EndCallResponse {
+  common.ResponseMeta meta     = 1; // 响应元信息
+  int32               duration = 2; // 通话时长（秒）
+}
+
+// --- GetCallToken ---
+message GetCallTokenRequest {
+  string user_id = 1; // 用户 ID
+  string call_id = 2; // 通话 ID
+}
+
+message GetCallTokenResponse {
+  common.ResponseMeta meta        = 1; // 响应元信息
+  string              token       = 2; // 新的 LiveKit Token
+  int64               expire_time = 3; // Token 过期时间戳（毫秒）
+}
+
+// --- GetCallHistory ---
+message GetCallHistoryRequest {
+  string            user_id    = 1; // 用户 ID
+  common.Pagination pagination = 2; // 分页参数
+  CallType          call_type  = 3; // 筛选通话类型（0=全部）
+  bool              missed_only = 4; // 仅查看未接来电
+}
+
+message GetCallHistoryResponse {
+  common.ResponseMeta     meta       = 1; // 响应元信息
+  repeated CallRecord     records    = 2; // 通话记录列表
+  common.PaginationResult pagination = 3; // 分页结果
+}
+
+// --- GetActiveCall ---
+message GetActiveCallRequest {
+  string user_id         = 1; // 用户 ID
+  string conversation_id = 2; // 会话 ID（可选，不传则查询用户所有进行中通话）
+}
+
+message GetActiveCallResponse {
+  common.ResponseMeta meta   = 1; // 响应元信息
+  CallRecord          call   = 2; // 进行中的通话信息（无进行中通话时为空）
+  bool                active = 3; // 是否有进行中通话
+}
+
+// --- UpdateCallMedia ---
+message UpdateCallMediaRequest {
+  string user_id       = 1; // 用户 ID
+  string call_id       = 2; // 通话 ID
+  bool   is_muted      = 3; // 是否静音
+  bool   is_camera_off = 4; // 是否关闭摄像头
+}
+
+message UpdateCallMediaResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}
+
+// --- CancelCall ---
+message CancelCallRequest {
+  string user_id = 1; // 发起方用户 ID
+  string call_id = 2; // 通话 ID
+}
+
+message CancelCallResponse {
+  common.ResponseMeta meta = 1; // 响应元信息
+}

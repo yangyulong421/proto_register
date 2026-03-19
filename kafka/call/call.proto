@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package kafka.call;
+
+option go_package = "proto_register/kafka/call";
+
+import "common/common.proto";
+import "rpc/call/call.proto";
+
+// =============================================================================
+// Call 音视频通话服务 Kafka 事件定义
+//
+// 通话信令通过 Kafka 事件 + Push 服务推送到客户端：
+//   Call 服务产出 call.* 事件 → Push 服务消费 → 通过 sync notify 推送信令
+//
+// 【生产的 Topic】
+//   1. call.initiated              — 通话发起（Push 消费→推送来电信令）
+//   2. call.answered               — 通话接听（Push 消费→通知发起方）
+//   3. call.ended                  — 通话结束（Push 消费→通知双方/群成员）
+//   4. call.missed                 — 未接来电（Push 消费→推送未接提醒）
+//   5. call.cancelled              — 通话取消（Push 消费→通知接收方）
+//   6. call.rejected               — 通话拒绝（Push 消费→通知发起方）
+//   7. call.participant.joined     — 参与者加入（群通话，Push 消费→通知其他参与者）
+//   8. call.participant.left       — 参与者离开（群通话，Push 消费→通知其他参与者）
+//   9. call.media.updated          — 媒体状态变更（静音/关闭摄像头，Push 消费→通知其他参与者）
+//   10. call.stats                 — 通话统计（Audit 消费）
+//
+// 【消费的 Topic】
+//   1. config.changed              — 配置变更（热更新通话相关参数，如超时时间）
+//   2. user.deactivated            — 用户注销（清理进行中通话）
+// =============================================================================
+
+// ==================== 生产事件 ====================
+
+// --- call.initiated ---
+// 通话发起事件（Push 消费后推送来电信令给接收方）
+message CallInitiatedEvent {
+  common.EventHeader      header            = 1;  // 事件头
+  string                  call_id           = 2;  // 通话 ID
+  call.CallType           call_type         = 3;  // 通话类型
+  string                  caller_id         = 4;  // 发起方用户 ID
+  string                  caller_nickname   = 5;  // 发起方昵称
+  string                  caller_avatar     = 6;  // 发起方头像
+  string                  receiver_id       = 7;  // 接收方 ID
+  common.ConversationType conversation_type = 8;  // 会话类型
+  string                  conversation_id   = 9;  // 会话 ID
+  string                  room_name         = 10; // LiveKit Room 名称
+  int64                   timeout_seconds   = 11; // 响铃超时秒数（默认 60）
+}
+
+// --- call.answered ---
+// 通话接听事件
+message CallAnsweredEvent {
+  common.EventHeader header     = 1; // 事件头
+  string             call_id    = 2; // 通话 ID
+  string             user_id    = 3; // 接听者用户 ID
+  string             caller_id  = 4; // 发起方用户 ID（用于推送通知）
+  int64              answer_time = 5; // 接听时间戳（毫秒）
+}
+
+// --- call.ended ---
+// 通话结束事件
+message CallEndedEvent {
+  common.EventHeader  header     = 1; // 事件头
+  string              call_id    = 2; // 通话 ID
+  call.CallEndReason  end_reason = 3; // 结束原因
+  string              ended_by   = 4; // 结束操作者用户 ID
+  int32               duration   = 5; // 通话时长（秒）
+  repeated string     user_ids   = 6; // 需要通知的用户 ID 列表
+  string              conversation_id = 7; // 会话 ID
+}
+
+// --- call.missed ---
+// 未接来电事件
+message CallMissedEvent {
+  common.EventHeader header      = 1; // 事件头
+  string             call_id     = 2; // 通话 ID
+  string             caller_id   = 3; // 发起方用户 ID
+  string             receiver_id = 4; // 未接听方用户 ID
+  call.CallType      call_type   = 5; // 通话类型
+  string             conversation_id = 6; // 会话 ID
+}
+
+// --- call.cancelled ---
+// 通话取消事件
+message CallCancelledEvent {
+  common.EventHeader header      = 1; // 事件头
+  string             call_id     = 2; // 通话 ID
+  string             caller_id   = 3; // 发起方（取消者）用户 ID
+  string             receiver_id = 4; // 接收方用户 ID
+  string             conversation_id = 5; // 会话 ID
+}
+
+// --- call.rejected ---
+// 通话拒绝事件
+message CallRejectedEvent {
+  common.EventHeader header    = 1; // 事件头
+  string             call_id   = 2; // 通话 ID
+  string             user_id   = 3; // 拒绝者用户 ID
+  string             caller_id = 4; // 发起方用户 ID
+  string             reason    = 5; // 拒绝原因
+}
+
+// --- call.participant.joined ---
+// 参与者加入事件（群通话）
+message CallParticipantJoinedEvent {
+  common.EventHeader header   = 1; // 事件头
+  string             call_id  = 2; // 通话 ID
+  string             user_id  = 3; // 加入者用户 ID
+  string             nickname = 4; // 加入者昵称
+  repeated string    notify_user_ids = 5; // 需要通知的用户 ID 列表
+}
+
+// --- call.participant.left ---
+// 参与者离开事件（群通话）
+message CallParticipantLeftEvent {
+  common.EventHeader header   = 1; // 事件头
+  string             call_id  = 2; // 通话 ID
+  string             user_id  = 3; // 离开者用户 ID
+  repeated string    notify_user_ids = 4; // 需要通知的用户 ID 列表
+}
+
+// --- call.media.updated ---
+// 媒体状态变更事件
+message CallMediaUpdatedEvent {
+  common.EventHeader header        = 1; // 事件头
+  string             call_id       = 2; // 通话 ID
+  string             user_id       = 3; // 用户 ID
+  bool               is_muted      = 4; // 是否静音
+  bool               is_camera_off = 5; // 是否关闭摄像头
+  repeated string    notify_user_ids = 6; // 需要通知的用户 ID 列表
+}
+
+// --- call.stats ---
+// 通话统计事件
+message CallStatsEvent {
+  common.EventHeader header    = 1; // 事件头
+  string             call_id   = 2; // 通话 ID
+  int32              duration  = 3; // 通话时长（秒）
+  call.CallType      call_type = 4; // 通话类型
+  int32              participant_count = 5; // 参与者数量
+  string             end_reason = 6; // 结束原因
+  int64              initiated_at = 7; // 发起时间
+  int64              ended_at    = 8; // 结束时间
+}
+
+// ==================== 消费事件（使用源服务 Proto 中的类型） ====================
+// config.changed → 使用 kafka.config.ConfigChangedEvent
+// user.deactivated → 使用 kafka.user.UserDeactivatedEvent

@@ -1,0 +1,143 @@
+syntax = "proto3";
+package kafka.media;
+option go_package = "proto_register/kafka/media";
+
+import "common/common.proto";
+
+// =============================================================================
+// Media 媒体服务 Kafka 事件定义
+//
+// 媒体服务负责图片、视频、语音、文件的上传、处理和存储
+//
+// 【生产的 Topic】
+//   1. media.uploaded             - 上传完成（自消费触发处理流水线）
+//   2. media.process.result       - 媒体处理结果（完成/失败，通过 ProcessStatus 区分）
+//   3. media.avatar.processed     - 头像处理完成
+//   4. media.deleted              - 媒体文件删除
+//   5. media.stats                - 媒体统计
+//
+// 【消费的 Topic】
+//   1. media.uploaded             - 自消费（触发处理流水线：缩略图/转码/截图）
+//   2. user.deactivated           - 用户注销（来自 user，标记媒体待延迟删除）
+//   3. audit.content.violation    - 内容违规（来自 audit，删除/封禁违规媒体）
+//   4. config.changed             - 配置变更（来自 config，热更新上传限制/允许类型等）
+//
+// 【职责边界说明】
+//   - 媒体处理在上传时触发，不依赖 msg.stored 事件
+//   - Message 服务在存储消息前已通过 RPC 调用 Media 服务完成媒体处理
+// =============================================================================
+
+// ==================== 本地业务枚举 ====================
+
+// 媒体类型枚举
+enum MediaType {
+  MEDIA_TYPE_UNSPECIFIED = 0; // 未指定
+  MEDIA_TYPE_IMAGE       = 1; // 图片
+  MEDIA_TYPE_VIDEO       = 2; // 视频
+  MEDIA_TYPE_VOICE       = 3; // 语音
+  MEDIA_TYPE_FILE        = 4; // 文件
+  MEDIA_TYPE_AVATAR      = 5; // 头像
+  MEDIA_TYPE_THUMBNAIL   = 6; // 缩略图
+}
+
+// 处理状态枚举
+enum ProcessStatus {
+  PROCESS_STATUS_UNSPECIFIED = 0; // 未指定
+  PROCESS_STATUS_PENDING     = 1; // 等待处理
+  PROCESS_STATUS_PROCESSING  = 2; // 处理中
+  PROCESS_STATUS_COMPLETED   = 3; // 处理完成
+  PROCESS_STATUS_FAILED      = 4; // 处理失败
+}
+
+// ============== 生产的事件 ==============
+
+// Topic: media.uploaded
+// 媒体上传完成事件
+message MediaUploadCompletedEvent {
+  common.EventHeader header        = 1;  // 事件头
+  string             media_id      = 2;  // 媒体文件 ID
+  string             uploader_id   = 3;  // 上传者 ID
+  MediaType          media_type    = 4;  // 媒体类型
+  string             original_name = 5;  // 原始文件名
+  string             content_type  = 6;  // MIME 类型
+  int64              file_size     = 7;  // 文件大小（字节）
+  string             storage_path  = 8;  // 存储路径
+  string             url           = 9;  // 访问 URL
+  string             md5           = 10; // 文件 MD5
+  int32              width         = 11; // 宽度（图片/视频）
+  int32              height        = 12; // 高度（图片/视频）
+  int32              duration      = 13; // 时长（秒，音视频）
+  int64              upload_time   = 14; // 上传时间
+  string             msg_id        = 15; // 关联消息 ID（消息附件时有值）
+}
+
+// Topic: media.process.result
+// 媒体处理结果事件（合并 completed 和 failed，通过 process_status 区分）
+// 设计说明：completed 和 failed 消费方完全一致（Message 服务），Key 一致（media_id），
+//          合并后减少 Topic 数量，降低 Kafka 消费组开销，简化消费端分支处理。
+message MediaProcessResultEvent {
+  common.EventHeader header          = 1;  // 事件头
+  string             media_id        = 2;  // 媒体文件 ID
+  string             process_id      = 3;  // 处理任务 ID
+  MediaType          media_type      = 4;  // 媒体类型
+  string             process_type    = 5;  // 处理类型：thumbnail / transcode / compress
+  ProcessStatus      process_status  = 6;  // 处理状态：COMPLETED(3) / FAILED(4)
+  // ---- completed 时有值的字段 ----
+  string             result_url      = 7;  // 处理结果 URL
+  string             result_path     = 8;  // 处理结果存储路径
+  int64              result_size     = 9;  // 处理结果文件大小
+  int32              result_width    = 10; // 结果宽度
+  int32              result_height   = 11; // 结果高度
+  int32              result_duration = 12; // 结果时长
+  string             format          = 13; // 输出格式
+  int64              process_time    = 14; // 处理耗时（毫秒）
+  int64              complete_time   = 15; // 完成时间
+  // ---- failed 时有值的字段 ----
+  string             error_code      = 16; // 错误码
+  string             error_msg       = 17; // 错误信息
+  int32              retry_count     = 18; // 已重试次数
+  bool               need_retry      = 19; // 是否需要重试
+  int64              fail_time       = 20; // 失败时间
+  // ---- 公共字段 ----
+  string             msg_id          = 21; // 关联消息 ID
+}
+
+// Topic: media.avatar.processed
+// 头像处理完成事件
+message MediaAvatarProcessedEvent {
+  common.EventHeader header       = 1; // 事件头
+  string             media_id     = 2; // 媒体文件 ID
+  string             owner_id     = 3; // 所有者 ID（用户 ID 或群 ID）
+  string             owner_type   = 4; // 所有者类型：user / group
+  string             original_url = 5; // 原始头像 URL
+  string             small_url    = 6; // 小图 URL（100x100）
+  string             medium_url   = 7; // 中图 URL（200x200）
+  string             large_url    = 8; // 大图 URL（400x400）
+  int64              process_time = 9; // 处理时间
+}
+
+// Topic: media.deleted
+// 媒体文件删除事件
+message MediaDeletedEvent {
+  common.EventHeader header      = 1; // 事件头
+  string             media_id    = 2; // 媒体文件 ID
+  MediaType          media_type  = 3; // 媒体类型
+  string             operator_id = 4; // 操作者 ID
+  string             reason      = 5; // 删除原因：expired / violation / user_delete / admin
+  int64              delete_time = 6; // 删除时间
+}
+
+// Topic: media.stats
+// 媒体统计事件
+message MediaStatsEvent {
+  common.EventHeader header              = 1;  // 事件头
+  string             server_id           = 2;  // 服务实例 ID
+  int64              period_start        = 3;  // 统计周期开始
+  int64              period_end          = 4;  // 统计周期结束
+  int64              upload_count        = 5;  // 上传数
+  int64              upload_size_bytes   = 6;  // 上传总大小（字节）
+  int64              process_count       = 7;  // 处理数
+  int64              process_fail_count  = 8;  // 处理失败数
+  int64              delete_count        = 9;  // 删除数
+  int64              storage_total_bytes = 10; // 存储总量（字节）
+}

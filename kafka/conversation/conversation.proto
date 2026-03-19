@@ -1,0 +1,211 @@
+syntax = "proto3";
+package kafka.conversation;
+option go_package = "proto_register/kafka/conversation";
+
+import "common/common.proto";
+
+// ============================================================
+// 会话列表服务 Kafka 事件（Conversation = 最近会话 / 会话管理）
+// ============================================================
+// 服务职责：
+//   管理用户的最近会话列表，包括会话创建、更新、删除、置顶、
+//   免打扰、未读数维护等。每条会话记录包含最后一条消息的摘要信息。
+//
+// 生产 Topic：
+//   conversation.updated       — 会话更新（最后一条消息变更）
+//   conversation.created       — 会话创建（首次消息触发）
+//   conversation.deleted       — 会话删除
+//   conversation.top.changed   — 置顶状态变更
+//   conversation.mute.changed  — 免打扰状态变更
+//   conversation.unread.reset  — 未读数重置（清零）
+//   conversation.unread.changed — 未读数增量变更（新消息到达时 +1）
+//   conversation.stats         — 统计
+//
+// 消费 Topic：
+//   msg.stored.single          — 单聊消息存储完成（来自 message，创建/更新会话）
+//   msg.stored.group           — 群聊消息存储完成（来自 message，创建/更新会话）
+//   ack.read.updated           — 已读事件（更新未读数）
+//   msg.recalled               — 撤回事件（更新最后一条消息预览）
+//   msg.forwarded              — 转发事件（更新目标会话）
+//   group.dissolved            — 群解散（删除会话）
+//   group.member.joined        — 群成员加入（创建会话）
+//   group.member.left          — 群成员退出（更新会话）
+//   group.member.kicked        — 群成员被踢（删除会话）
+//   relation.blocked           — 拉黑（标记会话）
+//   relation.friend.deleted    — 好友删除（更新会话状态）
+//   relation.remark.updated    — 备注修改（更新会话显示名称）
+//   user.deactivated           — 用户注销（清理会话数据）
+//   config.changed             — 配置变更
+// ============================================================
+
+// -------------------- 事件定义 --------------------
+
+// 会话更新事件 —— Topic: conversation.updated
+// 新消息到达时更新会话的最后一条消息摘要及未读数
+message ConversationUpdatedEvent {
+  common.EventHeader      header               = 1;  // 事件头部
+  string                  user_id              = 2;  // 用户 ID
+  string                  conversation_id      = 3;  // 会话 ID
+  common.ConversationType conversation_type    = 4;  // 会话类型
+  string                  last_msg_id          = 5;  // 最后一条消息 ID
+  int64                   last_msg_seq         = 6;  // 最后一条消息序号
+  string                  last_msg_preview     = 7;  // 最后一条消息预览文本
+  string                  last_msg_sender_id   = 8;  // 最后一条消息发送者 ID
+  string                  last_msg_sender_name = 9;  // 最后一条消息发送者昵称
+  common.MessageType      last_msg_type        = 10; // 最后一条消息类型
+  int64                   last_msg_time        = 11; // 最后一条消息时间戳（毫秒）
+  int32                   unread_count         = 12; // 未读消息数
+  bool                    has_at               = 13; // 是否有 @我 的消息
+}
+
+// 会话创建事件 —— Topic: conversation.created
+// 首次收到某会话的消息时触发
+message ConversationCreatedEvent {
+  common.EventHeader      header            = 1; // 事件头部
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  string                  peer_id           = 5; // 对端 ID（单聊为对方用户 ID，群聊为群 ID）
+  string                  peer_name         = 6; // 对端名称
+  string                  peer_avatar       = 7; // 对端头像 URL
+  int64                   create_time       = 8; // 会话创建时间戳（毫秒）
+}
+
+// 会话删除事件 —— Topic: conversation.deleted
+message ConversationDeletedEvent {
+  common.EventHeader      header            = 1; // 事件头部
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  string                  reason            = 5; // 删除原因（用户主动删除 / 群解散 / 拉黑等）
+  int64                   delete_time       = 6; // 删除时间戳（毫秒）
+}
+
+// 会话置顶状态变更事件 —— Topic: conversation.top.changed
+message ConversationTopChangedEvent {
+  common.EventHeader      header            = 1; // 事件头部
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  bool                    is_top            = 5; // 是否置顶
+  int64                   change_time       = 6; // 变更时间戳（毫秒）
+}
+
+// 会话免打扰状态变更事件 —— Topic: conversation.mute.changed
+message ConversationMuteChangedEvent {
+  common.EventHeader      header            = 1; // 事件头部
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  bool                    is_muted          = 5; // 是否免打扰
+  int64                   change_time       = 6; // 变更时间戳（毫秒）
+}
+
+// 未读数重置事件 —— Topic: conversation.unread.reset
+message ConversationUnreadResetEvent {
+  common.EventHeader      header            = 1; // 事件头部
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  int32                   old_unread_count  = 5; // 重置前未读数
+  int32                   new_unread_count  = 6; // 重置后未读数（通常为 0）
+  int64                   reset_time        = 7; // 重置时间戳（毫秒）
+}
+
+// 未读数增量变更事件 —— Topic: conversation.unread.changed
+// 新消息到达或已读消息变化导致某会话未读数增减
+// Push 服务消费此事件更新 iOS Badge 推送角标
+message ConversationUnreadChangedEvent {
+  common.EventHeader      header            = 1; // 事件头部
+  string                  user_id           = 2; // 用户 ID
+  string                  conversation_id   = 3; // 会话 ID
+  common.ConversationType conversation_type = 4; // 会话类型
+  int32                   unread_count      = 5; // 当前未读数
+  int32                   total_unread      = 6; // 用户所有会话未读总数（用于 Badge 更新）
+  int64                   change_time       = 7; // 变更时间戳（毫秒）
+}
+
+// 会话统计事件 —— Topic: conversation.stats
+message ConversationStatsEvent {
+  common.EventHeader header             = 1; // 事件头部
+  int64              total_updated      = 2; // 统计周期内会话更新总数
+  int64              total_created      = 3; // 统计周期内会话创建总数
+  int64              total_deleted      = 4; // 统计周期内会话删除总数
+  int64              total_top_changed  = 5; // 统计周期内置顶变更总数
+  int64              total_mute_changed = 6; // 统计周期内免打扰变更总数
+  int64              total_unread_reset = 7; // 统计周期内未读重置总数
+  int64              stats_time         = 8; // 统计时间戳（毫秒）
+  int64              period_seconds     = 9; // 统计周期（秒）
+}
+
+// ============== 消费的事件 ==============
+
+// Topic: msg.forwarded（来自 message）
+// 消息转发，更新目标会话的最后一条消息
+message MsgForwardedForConversation {
+  common.EventHeader                  header          = 1; // 事件头
+  string                              sender_id       = 2; // 转发者 ID
+  string                              original_msg_id = 3; // 原始消息 ID
+  repeated ForwardTargetForConversation targets       = 4; // 转发目标列表
+  int64                               forward_time    = 5; // 转发时间
+}
+
+// 转发目标
+message ForwardTargetForConversation {
+  string                  target_id         = 1; // 目标 ID
+  common.ConversationType conversation_type = 2; // 目标会话类型
+  string                  new_msg_id        = 3; // 新生成的消息 ID
+  string                  conversation_id   = 4; // 目标会话 ID
+  int64                   seq               = 5; // 新消息 seq
+}
+
+// Topic: group.member.left（来自 group）
+// 群成员退出，更新会话状态
+message GroupMemberLeftForConversation {
+  common.EventHeader header       = 1; // 事件头
+  string             group_id     = 2; // 群 ID
+  string             group_name   = 3; // 群名称
+  string             user_id      = 4; // 退出成员 ID
+  int32              member_count = 5; // 退出后群成员数
+  int64              leave_time   = 6; // 退出时间
+}
+
+// Topic: group.member.kicked（来自 group）
+// 群成员被踢，删除被踢者的会话
+message GroupMemberKickedForConversation {
+  common.EventHeader header      = 1; // 事件头
+  string             group_id    = 2; // 群 ID
+  string             group_name  = 3; // 群名称
+  string             operator_id = 4; // 操作者 ID
+  string             kicked_id   = 5; // 被踢成员 ID
+  int64              kick_time   = 6; // 踢出时间
+}
+
+// Topic: relation.friend.deleted（来自 relation）
+// 好友删除，更新会话状态
+message FriendDeletedForConversation {
+  common.EventHeader header      = 1; // 事件头
+  string             operator_id = 2; // 操作者 ID
+  string             target_id   = 3; // 被删除者 ID
+  int64              delete_time = 4; // 删除时间
+}
+
+// Topic: relation.blocked（来自 relation）
+// 用户拉黑，标记会话 blocked 状态
+message RelationBlockedForConversation {
+  common.EventHeader header     = 1; // 事件头
+  string             user_id    = 2; // 操作者 ID（拉黑方）
+  string             target_id  = 3; // 被拉黑者 ID
+  int64              block_time = 4; // 拉黑时间
+}
+
+// Topic: relation.remark.updated（来自 relation）
+// 备注修改，更新会话显示名称
+message RemarkUpdatedForConversation {
+  common.EventHeader header      = 1; // 事件头
+  string             user_id     = 2; // 操作者 ID
+  string             friend_id   = 3; // 好友 ID
+  string             old_remark  = 4; // 旧备注
+  string             new_remark  = 5; // 新备注
+  int64              update_time = 6; // 更新时间
+}

@@ -1,0 +1,111 @@
+syntax = "proto3";
+package kafka.apigateway;
+option go_package = "proto_register/kafka/apigateway";
+
+import "common/common.proto";
+
+// =============================================================================
+// APIGateway API 网关 Kafka 事件定义
+//
+// API 网关是外部 HTTP/HTTPS 请求的入口，负责路由、限流、认证、日志等
+// 注意：APIGateway 是面向客户端的 HTTP 网关，
+//       与 Connecte（长连接网关）定位不同
+//
+// 【生产的 Topic】
+//   1. apigateway.request.log     - 请求日志
+//   2. apigateway.rate.limited    - 限流触发
+//   3. apigateway.auth.fail       - 认证失败
+//   4. apigateway.error           - 网关错误
+//   5. apigateway.stats           - 网关统计
+//
+// 【消费的 Topic】
+//   1. config.changed             - 配置变更（来自 config，更新路由/限流规则）
+//   2. config.flag.changed        - 功能开关变更（来自 config，更新功能灰度开关）
+//   3. auth.token.revoked         - Token 撤销（来自 auth，更新黑名单缓存）
+//   4. user.banned                - 账号封禁（来自 user，更新封禁名单）
+// =============================================================================
+
+// ============== 生产的事件 ==============
+
+// Topic: apigateway.request.log
+// API 请求日志事件
+message RequestLogEvent {
+  common.EventHeader  header        = 1;  // 事件头
+  string              request_id    = 2;  // 请求 ID
+  string              user_id       = 3;  // 用户 ID（已认证时有值）
+  string              method        = 4;  // HTTP 方法
+  string              path          = 5;  // 请求路径
+  string              query         = 6;  // 查询参数
+  int32               status_code   = 7;  // 响应状态码
+  int64               latency_ms    = 8;  // 请求延迟（毫秒）
+  string              client_ip     = 9;  // 客户端 IP
+  string              user_agent    = 10; // User-Agent
+  string              upstream      = 11; // 上游服务名
+  int64               request_size  = 12; // 请求大小（字节）
+  int64               response_size = 13; // 响应大小（字节）
+  map<string, string> headers       = 14; // 请求头（脱敏后）
+  int64               request_time  = 15; // 请求时间
+}
+
+// Topic: apigateway.rate.limited
+// 限流触发事件
+message RateLimitedEvent {
+  common.EventHeader header        = 1;  // 事件头
+  string             user_id       = 2;  // 用户 ID
+  string             client_ip     = 3;  // 客户端 IP
+  string             path          = 4;  // 请求路径
+  string             rule_name     = 5;  // 触发的限流规则名称
+  string             limit_type    = 6;  // 限流类型：user / ip / api / global
+  int64              limit_value   = 7;  // 限流阈值
+  int64              current_count = 8;  // 当前计数
+  int64              window_sec    = 9;  // 限流窗口（秒）
+  int64              trigger_time  = 10; // 触发时间
+}
+
+// Topic: apigateway.auth.fail
+// 认证失败事件
+message AuthFailEvent {
+  common.EventHeader header     = 1;  // 事件头
+  string             client_ip  = 2;  // 客户端 IP
+  string             path       = 3;  // 请求路径
+  string             user_agent = 4;  // User-Agent
+  string             token      = 5;  // Token（脱敏后）
+  string             error_code = 6;  // 错误码
+  string             error_msg  = 7;  // 错误信息
+  string             auth_type  = 8;  // 认证类型：bearer / api_key / signature
+  int32              fail_count = 9;  // 连续失败次数
+  int64              fail_time  = 10; // 失败时间
+}
+
+// Topic: apigateway.error
+// 网关错误事件
+message GatewayErrorEvent {
+  common.EventHeader header      = 1;  // 事件头
+  string             request_id  = 2;  // 请求 ID
+  string             path        = 3;  // 请求路径
+  string             upstream    = 4;  // 上游服务名
+  int32              status_code = 5;  // HTTP 状态码
+  string             error_code  = 6;  // 错误码
+  string             error_msg   = 7;  // 错误信息
+  string             error_type  = 8;  // 错误类型：timeout / upstream_down / circuit_open
+  string             client_ip   = 9;  // 客户端 IP
+  int64              error_time  = 10; // 错误时间
+}
+
+// Topic: apigateway.stats
+// 网关统计事件
+message ApiGatewayStatsEvent {
+  common.EventHeader header            = 1;  // 事件头
+  string             server_id         = 2;  // 服务实例 ID
+  int64              period_start      = 3;  // 统计周期开始
+  int64              period_end        = 4;  // 统计周期结束
+  int64              total_requests    = 5;  // 总请求数
+  int64              success_count     = 6;  // 成功数
+  int64              error_count       = 7;  // 错误数
+  int64              rate_limit_count  = 8;  // 限流数
+  int64              auth_fail_count   = 9;  // 认证失败数
+  int64              avg_latency_ms    = 10; // 平均延迟（毫秒）
+  int64              p99_latency_ms    = 11; // P99 延迟（毫秒）
+  int64              traffic_in_bytes  = 12; // 入站流量（字节）
+  int64              traffic_out_bytes = 13; // 出站流量（字节）
+}

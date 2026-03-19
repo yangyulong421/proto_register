@@ -1,0 +1,93 @@
+syntax = "proto3";
+package kafka.config;
+option go_package = "proto_register/kafka/config";
+
+import "common/common.proto";
+
+// =============================================================================
+// Config 配置服务 Kafka 事件定义
+//
+// 配置服务负责全局配置管理、敏感词管理、系统广播等
+//
+// 【生产的 Topic】
+//   1. config.changed            - 配置变更（所有服务都消费此 Topic）
+//   2. config.flag.changed       - 功能开关变更（apigateway 等消费）
+//   3. config.sensitive.updated  - 敏感词库更新
+//   4. system.broadcast          - 系统广播（由 push 消费推送给客户端）
+//   5. config.stats              - 配置统计
+//
+// 【消费的 Topic】
+//   1. config.changed            - 自消费（多实例部署时，其他实例发布的变更同步本地缓存）
+//   2. audit.config.change       - 审计回调确认（来自 audit，配置变更审计确认）
+// =============================================================================
+
+// ============== 生产的事件 ==============
+
+// Topic: config.changed
+// 配置变更事件（全局广播，所有服务消费）
+message ConfigChangedEvent {
+  common.EventHeader header            = 1; // 事件头
+  string             config_key        = 2; // 配置键
+  string             old_value         = 3; // 旧值
+  string             new_value         = 4; // 新值
+  string             config_group      = 5; // 配置分组
+  string             operator_id       = 6; // 操作者 ID
+  string             description       = 7; // 变更描述
+  int64              change_time       = 8; // 变更时间
+  repeated string    affected_services = 9; // 影响的服务列表
+}
+
+// Topic: config.flag.changed
+// 功能开关变更事件（ApiGateway 等需要实时响应功能开关变化的服务消费）
+message ConfigFlagChangedEvent {
+  common.EventHeader header     = 1; // 事件头
+  string             flag_name  = 2; // 功能开关名称
+  bool               old_value  = 3; // 旧值
+  bool               new_value  = 4; // 新值
+  string             operator_id = 5; // 操作者 ID
+  string             description = 6; // 变更描述
+  int64              change_time = 7; // 变更时间
+}
+
+// Topic: config.sensitive.updated
+// 敏感词库更新事件
+message SensitiveWordsUpdatedEvent {
+  common.EventHeader header        = 1; // 事件头
+  string             action        = 2; // 操作：add / remove / replace / reload
+  repeated string    added_words   = 3; // 新增敏感词列表
+  repeated string    removed_words = 4; // 删除敏感词列表
+  string             category      = 5; // 分类：politics / porn / violence / ad 等
+  string             operator_id   = 6; // 操作者 ID
+  int32              total_count   = 7; // 更新后总词数
+  int64              update_time   = 8; // 更新时间
+}
+
+// Topic: system.broadcast
+// 系统广播事件（push 消费并推送给所有在线客户端）
+message SystemBroadcastEvent {
+  common.EventHeader         header           = 1;  // 事件头
+  string                     broadcast_id     = 2;  // 广播 ID
+  string                     title            = 3;  // 广播标题
+  string                     content          = 4;  // 广播内容
+  string                     data_type        = 5;  // 数据类型：text / html / json
+  bytes                      payload          = 6;  // 扩展载荷
+  string                     operator_id      = 7;  // 操作者 ID
+  repeated common.PlatformType target_platforms = 8; // 目标平台（空表示所有平台）
+  repeated string            target_user_ids  = 9;  // 目标用户（空表示所有用户）
+  int64                      send_time        = 10; // 发送时间
+  int64                      expire_time      = 11; // 过期时间
+  int32                      priority         = 12; // 优先级（1-10，10 最高）
+}
+
+// Topic: config.stats
+// 配置统计事件
+message ConfigStatsEvent {
+  common.EventHeader header                 = 1;  // 事件头
+  string             server_id              = 2;  // 服务实例 ID
+  int64              period_start           = 3;  // 统计周期开始
+  int64              period_end             = 4;  // 统计周期结束
+  int64              config_change_count    = 5;  // 配置变更数
+  int64              sensitive_update_count = 6;  // 敏感词更新数
+  int64              broadcast_count        = 7;  // 系统广播数
+  int64              total_config_count     = 8;  // 总配置项数
+}
